@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Expose the db_test helper module for use by other crates' integration tests.
+db-test = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
