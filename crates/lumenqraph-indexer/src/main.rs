@@ -18,6 +18,8 @@ mod specs;
 mod state;
 mod store;
 
+use std::time::Duration;
+
 use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
@@ -47,7 +49,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(env_parse_u32("DATABASE_MAX_CONNECTIONS", 5))
+        .min_connections(env_parse_u32("DATABASE_MIN_CONNECTIONS", 1))
+        .acquire_timeout(Duration::from_secs(env_parse_u64(
+            "DATABASE_ACQUIRE_TIMEOUT_SECS",
+            30,
+        )))
+        .idle_timeout(Duration::from_secs(env_parse_u64(
+            "DATABASE_IDLE_TIMEOUT_SECS",
+            600,
+        )))
         .connect(&config.database_url)
         .await
         .context("failed to connect to Postgres")?;
@@ -73,6 +84,20 @@ async fn main() -> anyhow::Result<()> {
         "starting lumenqraph indexer (live)"
     );
     poller::run(pool, rpc, config).await
+}
+
+fn env_parse_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_parse_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 /// Fetch a contract's deployed WASM and print its parsed interface as JSON.

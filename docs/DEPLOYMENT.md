@@ -106,6 +106,34 @@ testnet is a scratch network, nobody needs deep history there).
 - [ ] Indexer pinned 24/7 (`auto_stop_machines=false`, `min_machines_running=1`).
 - [ ] Scrape `/metrics`; alert on `lumenqraph_indexer_lag_ledgers`.
 
+## Connection pool sizing
+
+Each service opens its own pool. Four env vars control every pool (the defaults
+below are per-service):
+
+| Env var | Indexer default | API default | Webhooks default | Notes |
+| --- | --- | --- | --- | --- |
+| `DATABASE_MAX_CONNECTIONS` | 5 | 10 | 5 | Hard ceiling; capped by the DB tier. |
+| `DATABASE_MIN_CONNECTIONS` | 1 | 1 | 1 | Connections kept warm at idle. |
+| `DATABASE_ACQUIRE_TIMEOUT_SECS` | 30 | 30 | 30 | Fail a request rather than queue indefinitely. |
+| `DATABASE_IDLE_TIMEOUT_SECS` | 600 | 600 | 600 | Reclaim idle connections after this many seconds. |
+
+**Sizing guidance for managed tiers**
+
+Managed databases have hard connection caps (Neon free: 25, Supabase free: 60,
+Render free Postgres: 25). Running all three services plus the managed pooler
+counts against the same cap. A safe starting point for free tiers:
+
+```
+DATABASE_MAX_CONNECTIONS=3   # indexer — writes only, low concurrency
+DATABASE_MAX_CONNECTIONS=8   # api     — concurrent reads; scale up with API replicas
+DATABASE_MAX_CONNECTIONS=2   # webhooks — delivery is serialised per subscription
+```
+
+On paid plans (Neon Standard 100 conn, Supabase Pro 60 direct / PgBouncer
+unlimited): raise the API pool first; the indexer and webhooks are single-writer
+processes and rarely benefit from more than 5–10 connections each.
+
 ## Postgres
 
 Any Postgres 14+ works. For managed hosting, point `DATABASE_URL` at Supabase or
