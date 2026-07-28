@@ -6,6 +6,7 @@ mod auth;
 mod error;
 mod graphql;
 mod metrics;
+mod metrics_middleware;
 mod pagination;
 mod rate_limit;
 mod routes;
@@ -121,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         rpc_limiter: Arc::new(RateLimiter::new()),
         rpc_require_auth: env_bool("RPC_REQUIRE_API_KEY", false),
         rpc_anon_rate_limit: env_parse("RPC_ROUTE_RATE_LIMIT_PER_MIN", 10),
+        metrics: Arc::new(metrics_middleware::MetricsCollector::new()),
     };
 
     let cors_layer = build_cors_layer();
