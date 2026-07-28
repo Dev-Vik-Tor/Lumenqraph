@@ -41,6 +41,55 @@ const preview = await lq.simulate(contracts[0].contract_id, {
 });
 ```
 
+## Retry, backoff, and timeout (#81)
+
+The client retries transient failures automatically with **exponential backoff
++ full jitter** and honours the `Retry-After` header on `429` responses. Each
+attempt gets its own timeout window via `AbortController`.
+
+```ts
+const lq = new LumenqraphClient({
+  baseUrl: "http://localhost:8080",
+  retry: {
+    maxRetries:  3,       // default: 3  — set to 0 to disable
+    baseDelayMs: 250,     // default: 250 ms
+    maxDelayMs:  30_000,  // default: 30 s  cap on computed delay
+    timeoutMs:   10_000,  // default: 10 s  per-request timeout
+  },
+});
+```
+
+Retried statuses: `429`, `502`, `503`, `504`, and any network/abort error.
+All other non-2xx responses are thrown immediately as `LumenqraphError`.
+
+## Webhook signature verification (#83)
+
+Every webhook delivery carries an `X-Lumenqraph-Signature: sha256=<hmac>`
+header. Use the `verifyWebhook` helper — it uses the Web Crypto API for a
+**constant-time comparison** safe against timing attacks.
+
+```ts
+import { verifyWebhook } from "@lumenqraph/sdk";
+
+// Express / Node example:
+app.post("/hook", express.raw({ type: "*/*" }), async (req, res) => {
+  const valid = await verifyWebhook(
+    req.body,                                           // raw Buffer or string
+    req.headers["x-lumenqraph-signature"] as string,   // "sha256=…"
+    process.env.WEBHOOK_SECRET!,
+  );
+  if (!valid) return res.status(401).send("invalid signature");
+  // process event …
+  res.sendStatus(200);
+});
+```
+
+`verifyWebhook(rawBody, signatureHeader, secret): Promise<boolean>`
+
+- `rawBody` — `string` or `Uint8Array` (the raw, un-parsed request body).
+- `signatureHeader` — the full `X-Lumenqraph-Signature` header value, e.g. `"sha256=abc123…"`.
+- `secret` — the subscription secret returned at webhook creation.
+
 ## Cursor pagination
 
 The GraphQL endpoint exposes Relay-style cursor connections. The SDK wraps them
@@ -92,15 +141,35 @@ const data = await lq.graphql<{ transfers: { edges: { node: unknown }[] } }>(`
 | `simulate(id, { function, args, sourceAccount })` | `POST /contracts/:id/simulate` |
 | `graphql(query, variables)` | `POST /graphql` |
 | `eventsPage` / `paginateEvents` | `POST /graphql` (cursor) |
+| `verifyWebhook(rawBody, sigHeader, secret)` *(standalone)* | — |
 
 Errors for non-2xx responses are thrown as `LumenqraphError` (`.status`, `.body`).
+
+## Generated types (#82)
+
+SDK response types are generated from the canonical OpenAPI schema at
+`openapi.yaml` (repo root) via `openapi-typescript`. The generated file lives
+at `generated/api.d.ts` and is committed. CI fails if it drifts from the
+schema. See [CODEGEN.md](CODEGEN.md) for the full workflow.
+
+```bash
+# Regenerate after editing openapi.yaml:
+cd sdk/typescript
+npm run codegen
+
+# Verify (run in CI):
+npm run codegen:check
+```
 
 ## Build from source
 
 ```bash
 cd sdk/typescript
 npm install
-npm run build   # emits dist/ (ESM + .d.ts)
+npm run build        # emits dist/ (ESM + .d.ts)
+npm test             # runs vitest (26 tests)
+npm run typecheck    # tsc --noEmit
+npm run codegen:check # verify generated types are up to date
 ```
 
 ## License
