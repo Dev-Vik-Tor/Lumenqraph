@@ -8,6 +8,7 @@ mod graphql;
 mod metrics;
 mod pagination;
 mod rate_limit;
+mod request_id;
 mod routes;
 mod rpc;
 mod specs;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::extract::DefaultBodyLimit;
 use axum::http;
+use axum::middleware;
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -129,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = routes::router(state)
         .layer(DefaultBodyLimit::max(max_body_bytes as usize))
+        .layer(middleware::from_fn(request_id::request_id_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer);
 
