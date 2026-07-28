@@ -18,8 +18,11 @@ use sqlx::PgPool;
 use stellar_xdr::curr::{ContractDataDurability, Limits, ScVal, WriteXdr};
 use tracing::{debug, warn};
 
-use crate::rpc_client::RpcClient;
+use crate::rpc_client::{DataEntry, RpcClient};
 use crate::specs::SpecCache;
+
+/// Max keys per `getLedgerEntries` RPC call when batching holder balance snapshots.
+const MAX_BATCH_KEYS: usize = 100;
 
 /// Snapshot a contract's instance storage if it has changed since the last
 /// snapshot. Best-effort: errors are logged, never propagated to the poller.
@@ -79,6 +82,9 @@ async fn try_snapshot(
 /// `Balance(Address)`) if it has changed since the last snapshot. Best-effort:
 /// errors are logged, never propagated to the poller. `label` is an optional
 /// grouping tag stored alongside the row (e.g. `"balance"`).
+///
+/// For bulk per-holder snapshots use [`snapshot_balances_batch`] instead.
+#[allow(dead_code)]
 pub async fn snapshot_data(
     pool: &PgPool,
     rpc: &RpcClient,
@@ -104,7 +110,79 @@ async fn try_snapshot_data(
         // No entry (e.g. a holder whose balance was never written / has expired).
         return Ok(());
     };
+    try_write_snapshot_data(pool, contract_id, key, durability, label, &entry).await
+}
 
+/// Snapshot per-holder balances discovered during a cycle in a small number of
+/// batched `getLedgerEntries` calls instead of one call per holder.
+///
+/// Keys are chunked to `MAX_BATCH_KEYS` entries per RPC call. Change detection
+/// and DB writes are unchanged from the per-entry path.
+pub async fn snapshot_balances_batch(
+    pool: &PgPool,
+    rpc: &RpcClient,
+    holders_by_contract: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    contract_ids_filter: &[String],
+    balance_key_symbol: &str,
+    durability: ContractDataDurability,
+) {
+    use crate::keys;
+
+    // Build the flat list of (contract_id, key, durability, label) to fetch.
+    let mut batch: Vec<(String, ScVal, ContractDataDurability, &str)> = Vec::new();
+    for (contract_id, holders) in holders_by_contract {
+        if !contract_ids_filter.is_empty() && !contract_ids_filter.contains(contract_id) {
+            continue;
+        }
+        for holder in holders {
+            match keys::balance_key(balance_key_symbol, holder) {
+                Ok(key) => batch.push((contract_id.clone(), key, durability, "balance")),
+                Err(e) => debug!(holder, error = %e, "skipping unbuildable balance key"),
+            }
+        }
+    }
+
+    if batch.is_empty() {
+        return;
+    }
+
+    debug!(count = batch.len(), "batching holder balance key snapshots");
+
+    for chunk in batch.chunks(MAX_BATCH_KEYS) {
+        let rpc_keys: Vec<(String, ScVal, ContractDataDurability)> = chunk
+            .iter()
+            .map(|(cid, key, dur, _)| (cid.clone(), key.clone(), *dur))
+            .collect();
+
+        let results = match rpc.get_contract_data_batch(&rpc_keys).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "batch contract-data fetch failed");
+                continue;
+            }
+        };
+
+        for ((contract_id, key, dur, label), entry_opt) in chunk.iter().zip(results.iter()) {
+            let Some(entry) = entry_opt else { continue };
+            if let Err(e) =
+                try_write_snapshot_data(pool, contract_id, key, *dur, Some(label), entry).await
+            {
+                warn!(contract_id = %contract_id, error = %e, "contract-data snapshot write failed");
+            }
+        }
+    }
+}
+
+/// Write a single contract-data snapshot row after change detection. Shared by
+/// the per-entry path (`try_snapshot_data`) and the batch path (`snapshot_balances_batch`).
+async fn try_write_snapshot_data(
+    pool: &PgPool,
+    contract_id: &str,
+    key: &ScVal,
+    durability: ContractDataDurability,
+    label: Option<&str>,
+    entry: &DataEntry,
+) -> anyhow::Result<()> {
     let key_xdr = key.to_xdr_base64(Limits::none())?;
     let key_hash = hex::encode(Sha256::digest(key_xdr.as_bytes()));
     let durability_str = match durability {

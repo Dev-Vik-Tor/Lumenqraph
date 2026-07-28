@@ -299,6 +299,9 @@ impl RpcClient {
     /// Returns the decoded value `ScVal` and the ledger it last changed at, or
     /// `Ok(None)` if no such entry exists (e.g. a holder with a zero balance
     /// whose entry was never written or has expired).
+    ///
+    /// For bulk fetches use [`get_contract_data_batch`] instead.
+    #[allow(dead_code)]
     pub async fn get_contract_data(
         &self,
         contract_id: &str,
@@ -343,6 +346,69 @@ impl RpcClient {
             .context("decode ledger entry")?;
         Ok(Some((data, first.last_modified_ledger_seq)))
     }
+
+    /// Fetch a batch of contract-data entries in a single `getLedgerEntries` call.
+    /// The returned `Vec` is positionally aligned with `keys`: `None` means the
+    /// entry was absent (e.g. a zero-balance holder whose entry never existed or
+    /// has expired). Callers should chunk large slices to `MAX_BATCH_KEYS`.
+    pub async fn get_contract_data_batch(
+        &self,
+        keys: &[(String, ScVal, ContractDataDurability)],
+    ) -> anyhow::Result<Vec<Option<DataEntry>>> {
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Encode all input keys and record their index for matching response entries.
+        let mut key_b64s: Vec<String> = Vec::with_capacity(keys.len());
+        for (contract_id, key, durability) in keys {
+            let addr = ScAddress::from_str(contract_id)
+                .with_context(|| format!("invalid contract id {contract_id}"))?;
+            let lkey = LedgerKey::ContractData(LedgerKeyContractData {
+                contract: addr,
+                key: key.clone(),
+                durability: *durability,
+            });
+            key_b64s.push(lkey.to_xdr_base64(Limits::none()).context("encode ledger key")?);
+        }
+
+        let key_to_idx: std::collections::HashMap<&str, usize> = key_b64s
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.as_str(), i))
+            .collect();
+
+        let result: LedgerEntriesResult = self
+            .call("getLedgerEntries", serde_json::json!({ "keys": key_b64s }))
+            .await?;
+
+        let mut output = vec![None; keys.len()];
+        for item in result.entries.into_iter().flatten() {
+            let data = LedgerEntryData::from_xdr_base64(&item.xdr, Limits::none())
+                .context("decode ledger entry")?;
+            // Re-derive the LedgerKey from the returned entry so we can match it
+            // back to its position in the input slice.
+            if let LedgerEntryData::ContractData(ref cd) = data {
+                let entry_key = LedgerKey::ContractData(LedgerKeyContractData {
+                    contract: cd.contract.clone(),
+                    key: cd.key.clone(),
+                    durability: cd.durability,
+                });
+                if let Ok(k) = entry_key.to_xdr_base64(Limits::none()) {
+                    if let Some(&idx) = key_to_idx.get(k.as_str()) {
+                        if let LedgerEntryData::ContractData(cd) = data {
+                            output[idx] = Some(DataEntry {
+                                val: cd.val,
+                                last_modified_ledger: item.last_modified_ledger_seq,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
 }
 
 /// A contract's instance entry: executable hash, instance storage, and the
@@ -355,6 +421,7 @@ pub struct InstanceEntry {
 
 /// A single contract-data entry: its decoded value and the ledger it last
 /// changed at.
+#[derive(Clone)]
 pub struct DataEntry {
     pub val: ScVal,
     pub last_modified_ledger: i64,
