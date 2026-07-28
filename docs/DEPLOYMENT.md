@@ -135,6 +135,70 @@ constantly and so never idles:
 Scrape `GET /metrics`. Alert on `lumenqraph_indexer_lag_ledgers` climbing (the
 indexer is falling behind) and on `lumenqraph_indexer_errors_total` rate.
 
+### Monitoring Setup
+
+Ship-ready Prometheus alert rules and Grafana dashboards are included in the
+[`monitoring/`](../monitoring/) directory:
+
+- **`prometheus_alerts.yml`** — Pre-configured alerts for indexer lag, error
+  rates, stalled state, and API health.
+- **`grafana_dashboard.json`** — Ready-to-import dashboard covering lag, event
+  ingestion rate, error rate, and API throughput.
+- **`prometheus.yml`** — Sample Prometheus config for scraping the metrics
+  endpoint.
+- **`README.md`** — Full setup and customization guide.
+
+#### Quick Start
+
+1. **Deploy Prometheus** with the alert rules:
+   ```bash
+   docker run -d \
+     -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
+     -v $(pwd)/monitoring/prometheus_alerts.yml:/etc/prometheus/prometheus_alerts.yml \
+     -p 9090:9090 \
+     prom/prometheus
+   ```
+
+2. **Deploy Grafana**:
+   ```bash
+   docker run -d -p 3000:3000 grafana/grafana
+   ```
+   Default login: `admin` / `admin`.
+
+3. **Add Prometheus data source** in Grafana:
+   - Settings → Data Sources → Add Prometheus
+   - URL: `http://prometheus:9090`
+
+4. **Import the dashboard**:
+   - Create → Import
+   - Upload `monitoring/grafana_dashboard.json`
+
+#### Metrics Overview
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `lumenqraph_indexer_lag_ledgers` | Gauge | Ledgers behind chain tip |
+| `lumenqraph_indexer_last_processed_ledger` | Gauge | Most recent ledger processed |
+| `lumenqraph_indexer_chain_tip_ledger` | Gauge | Latest ledger on chain |
+| `lumenqraph_indexer_ingested_total` | Counter | Total events ingested |
+| `lumenqraph_indexer_errors_total` | Counter | Total poll-cycle errors |
+| `lumenqraph_api_requests_total` | Counter | Total API requests served |
+| `lumenqraph_events_total` | Gauge | Total events in database |
+
+#### Alert Rules
+
+| Alert | Threshold | Duration | Severity |
+| --- | --- | --- | --- |
+| IndexerLagHigh | lag > 100 ledgers | 5 min | warning |
+| IndexerLagCritical | lag > 500 ledgers | 2 min | critical |
+| IndexerStalled | No ingestion × lag exists | 5 min | critical |
+| IndexerErrorRateHigh | error rate > 1% | 2 min | warning |
+| LargeLagGrowth | lag growth > 1000 ledgers/hour | 5 min | warning |
+| IngestRateLow | < 1 event/sec | 10 min | warning |
+| APINoRequests | No requests | 5 min | warning |
+
+Tune thresholds in `monitoring/prometheus_alerts.yml` to fit your SLA.
+
 ## Limits
 
 `getEvents` serves only ~7 days of history, and public RPCs reject a request
