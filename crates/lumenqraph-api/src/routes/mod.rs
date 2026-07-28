@@ -8,6 +8,7 @@ pub mod proxy;
 pub mod read;
 pub mod sdk;
 pub mod stats;
+pub mod stream;
 pub mod transfers;
 pub mod webhooks;
 
@@ -102,6 +103,7 @@ pub fn router(state: AppState) -> Router {
             get(read::list_functions),
         )
         .route("/contracts/:contract_id/events", get(events::list_events))
+        .route("/contracts/:contract_id/events/stream", get(stream::stream_events))
         .route("/contracts/:contract_id/stats", get(stats::contract_stats))
         .route(
             "/contracts/:contract_id/transfers",
