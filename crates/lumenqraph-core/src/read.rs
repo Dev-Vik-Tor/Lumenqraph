@@ -468,6 +468,8 @@ fn union_to_scval(
             obj.len()
         )));
     }
+    // SAFETY: we verified obj.len() == 1 two lines above; this cannot be None.
+    #[allow(clippy::expect_used)]
     let (key, val) = obj.iter().next().expect("len checked above");
     match find(key) {
         Some(Case::VoidV0(_)) => {
@@ -680,6 +682,8 @@ fn vecm<U>(items: Vec<U>, name: &str) -> Result<VecM<U>, EncodeError> {
     })
 }
 
+// Slicing a fixed [u8; 16] into [u8; 8] halves is always in-bounds.
+#[allow(clippy::unwrap_used)]
 fn i128_parts(n: i128) -> Int128Parts {
     let b = n.to_be_bytes();
     Int128Parts {
