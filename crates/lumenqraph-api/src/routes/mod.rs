@@ -54,6 +54,8 @@ pub fn router(state: AppState) -> Router {
     // Public, unauthenticated observability endpoints.
     let public = Router::new()
         .route("/health", get(health::health))
+        .route("/livez", get(health::livez))
+        .route("/readyz", get(health::readyz))
         .route("/metrics", get(metrics::metrics));
 
     // RPC-backed routes with separate, tighter rate limiting (they hit upstream RPC).

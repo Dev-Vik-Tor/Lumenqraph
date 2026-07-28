@@ -173,6 +173,8 @@ Base URL defaults to `http://localhost:8080`. Full reference: [docs/API.md](docs
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | Indexing status and chain-tip lag. *(public)* |
+| `GET` | `/livez` | Liveness probe: returns 200 if process is running. No database access. *(public)* |
+| `GET` | `/readyz` | Readiness probe: returns 200 only when indexer is caught up and healthy; 503 otherwise. *(public)* |
 | `GET` | `/metrics` | Prometheus metrics. *(public)* |
 | `GET` | `/contracts` | Contracts seen, with per-contract counts. |
 | `GET` | `/contracts/:id/interface` | The contract's decoded on-chain interface: functions, events, and user-defined types. Query: `version` (a historical version; default current). |

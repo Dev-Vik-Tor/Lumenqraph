@@ -10,6 +10,7 @@ are always public. Rate-limit breaches return `429`; bad/revoked keys `401`.
 ## Public
 
 ### `GET /health`
+Human-readable status: indexing freshness and chain-tip lag.
 ```json
 { "status": "ok", "network": "mainnet",
   "network_passphrase": "Public Global Stellar Network ; September 2015",
@@ -26,6 +27,25 @@ When the operator has mounted sibling instances (`INSTANCE_MOUNTS`, e.g. the
 hosted demo serving a testnet deployment under the same origin), `/health` also
 advertises them as `"mounts": { "testnet": "/testnet" }` — every endpoint
 documented here works under that prefix, served by the sibling.
+
+### `GET /livez`
+Kubernetes-style liveness probe: returns `200 OK` if the process is running,
+nothing else. Requires no database access and no logic beyond "is the server
+listening?" Used by orchestrators to detect dead or stuck processes and restart
+them.
+
+### `GET /readyz`
+Kubernetes-style readiness probe: returns `200 OK` only when the indexer is
+caught up and healthy; otherwise `503 Service Unavailable`. Checks:
+- Database is reachable
+- Cursor has been created (at least one pass through the event stream)
+- Indexing lag is below the threshold (default: 100 ledgers)
+- Cursor was updated recently (default: within 120 seconds)
+
+Used by orchestrators to route traffic only to ready instances and avoid
+cascading restarts during slow startup. Configurable via environment:
+- `READYZ_LAG_THRESHOLD` (ledgers, default 100)
+- `READYZ_MAX_AGE_SECS` (seconds, default 120)
 
 ### `GET /metrics`
 Prometheus text: `lumenqraph_indexer_lag_ledgers`, `lumenqraph_events_total`,
