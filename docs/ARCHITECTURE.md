@@ -1,6 +1,6 @@
 # Architecture
 
-Lumenqraph is a Rust workspace of four crates: three service binaries plus a
+Lumenqraph is a Rust workspace of five crates: four service binaries plus a
 shared library.
 
 ```
@@ -8,20 +8,23 @@ shared library.
                  │                lumenqraph-core             │
                  │  models · XDR→JSON decode · strkey · errors│
                  └───────────────────────────────────────────┘
-                     ▲              ▲                    ▲
-                     │              │                    │
-   Soroban RPC ──poll─┤   ┌─────────┴─────────┐   ┌──────┴────────┐
-  (getEvents)         │   │  lumenqraph-api    │   │ lumenqraph-   │
-        ┌─────────────┴─┐ │  (Axum, read+mgmt) │   │ webhooks      │
-        │ lumenqraph-   │ └─────────┬──────────┘   │ (delivery)    │
-        │ indexer       │           │              └──────┬────────┘
-        │ (ingest+decode│           │                     │
-        └───────┬───────┘           │                     │
-                │  write            │ read                │ read/write
-                ▼                   ▼                     ▼
+                     ▲              ▲          ▲              ▲
+                     │              │          │              │
+   Soroban RPC ──poll─┤   ┌─────────┴──┐ ┌────┴───────┐ ┌────┴────────┐
+  (getEvents)         │   │lumenqraph- │ │lumenqraph- │ │lumenqraph-  │
+        ┌─────────────┴─┐ │api         │ │webhooks    │ │mcp          │
+        │ lumenqraph-   │ │(Axum,      │ │(delivery)  │ │(read-only   │
+        │ indexer       │ │read+mgmt)  │ │            │ │MCP server)  │
+        │ (ingest+decode│ └─────────┬──┘ └────┬───────┘ └────┬────────┘
+        └───────┬───────┘           │         │             │
+                │  write            │ read    │ read/write  │ read
+                ▼                   ▼         ▼             ▼
              ┌──────────────────── Postgres ─────────────────────┐
              │ events · token_transfers · indexer_cursor         │
+             │ contract_spec_versions · contract_state           │
+             │ contract_data · contract_summaries                │
              │ api_keys · webhook_subscriptions · deliveries     │
+             │ webhook_state                                     │
              └───────────────────────────────────────────────────┘
 ```
 
