@@ -3,6 +3,7 @@
 //! interrupt ingestion.
 
 mod auth;
+mod call_cache;
 mod error;
 mod graphql;
 mod metrics;
@@ -16,6 +17,7 @@ mod url_validation;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::extract::DefaultBodyLimit;
@@ -25,6 +27,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use call_cache::CallCache;
 use rate_limit::RateLimiter;
 use state::AppState;
 
@@ -104,10 +107,24 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string());
 
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(env_parse("DATABASE_MAX_CONNECTIONS", 10u32))
+        .min_connections(env_parse("DATABASE_MIN_CONNECTIONS", 1u32))
+        .acquire_timeout(Duration::from_secs(env_parse(
+            "DATABASE_ACQUIRE_TIMEOUT_SECS",
+            30u64,
+        )))
+        .idle_timeout(Duration::from_secs(env_parse(
+            "DATABASE_IDLE_TIMEOUT_SECS",
+            600u64,
+        )))
         .connect(&database_url)
         .await
         .context("failed to connect to Postgres")?;
+
+    let call_cache = Arc::new(CallCache::new(
+        env_parse("CALL_CACHE_MAX_ENTRIES", 1000usize),
+        env_parse("CALL_CACHE_TTL_SECS", 5u64),
+    ));
 
     let state = AppState {
         pool,
@@ -121,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
         rpc_limiter: Arc::new(RateLimiter::new()),
         rpc_require_auth: env_bool("RPC_REQUIRE_API_KEY", false),
         rpc_anon_rate_limit: env_parse("RPC_ROUTE_RATE_LIMIT_PER_MIN", 10),
+        call_cache,
     };
 
     let cors_layer = build_cors_layer();
