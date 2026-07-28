@@ -6,10 +6,10 @@
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ApiError, ApiResult};
@@ -50,7 +50,7 @@ fn extract_client_ip(headers: &HeaderMap, socket_addr: Option<SocketAddr>) -> St
         if let Some(forwarded) = headers.get("forwarded").and_then(|v| v.to_str().ok()) {
             if let Some(start) = forwarded.find("for=") {
                 let rest = &forwarded[start + 4..];
-                if let Some(end) = rest.find(|c| c == ';' || c == ',') {
+                if let Some(end) = rest.find([';', ',']) {
                     return rest[..end].trim_matches('"').to_string();
                 } else {
                     return rest.trim_matches('"').to_string();
@@ -160,9 +160,263 @@ pub async fn rpc_auth_and_rate_limit(
         }
     };
 
-    if !state.rpc_limiter.check(&identity, limit) {
+    if !state.rpc_limiter.check(&identity, limit).allowed {
         return Err(ApiError::too_many_requests());
     }
 
     Ok(next.run(req).await)
+}
+
+// ---- HTTP-level integration tests ----------------------------------------
+//
+// These tests boot the real Axum router against a live Postgres instance and
+// drive requests with reqwest. They verify auth, rate-limiting, and the error
+// envelope without mocking any middleware.
+//
+// Run with:
+//   cargo test -p lumenqraph-api -- --ignored --test-threads=1
+//
+// --test-threads=1 is required: each test drops and recreates the public
+// schema, which would race with any parallel test.
+
+#[cfg(test)]
+mod integration_tests {
+    use std::net::SocketAddr;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::PgPool;
+
+    use super::hash_key;
+    use crate::rate_limit::RateLimiter;
+    use crate::routes;
+    use crate::rpc::RpcClient;
+    use crate::specs::SpecCache;
+    use crate::state::AppState;
+
+    // ---- test fixtures ----
+
+    async fn db_pool() -> PgPool {
+        let url =
+            std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to test database");
+        for stmt in ["DROP SCHEMA public CASCADE", "CREATE SCHEMA public"] {
+            sqlx::query(stmt)
+                .execute(&pool)
+                .await
+                .expect("reset schema");
+        }
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    fn make_state(pool: PgPool, require_auth: bool, anon_rate: i32) -> AppState {
+        AppState {
+            pool,
+            require_auth,
+            anon_rate_limit: anon_rate,
+            limiter: Arc::new(RateLimiter::new()),
+            http_requests: Arc::new(AtomicU64::new(0)),
+            rpc: RpcClient::new("http://127.0.0.1:26657"),
+            specs: Arc::new(SpecCache::new()),
+            mounts: Arc::new(vec![]),
+            rpc_limiter: Arc::new(RateLimiter::new()),
+            rpc_require_auth: false,
+            rpc_anon_rate_limit: 100,
+        }
+    }
+
+    async fn spawn_server(state: AppState) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let app = routes::router(state)
+            .into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn insert_api_key(pool: &PgPool, key: &str, revoked: bool) {
+        let hash = hash_key(key);
+        sqlx::query(
+            "INSERT INTO api_keys (key_hash, revoked, rate_limit_per_min, created_at)
+             VALUES ($1, $2, 100, NOW())",
+        )
+        .bind(&hash)
+        .bind(revoked)
+        .execute(pool)
+        .await
+        .expect("insert api key");
+    }
+
+    // ---- tests ----
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn health_is_public_even_when_auth_required() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let res = reqwest::get(format!("{base}/health")).await.unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn metrics_is_public_even_when_auth_required() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let res = reqwest::get(format!("{base}/metrics")).await.unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn anon_request_allowed_when_auth_not_required() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, false, 60)).await;
+        let res = reqwest::get(format!("{base}/contracts")).await.unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn anon_request_blocked_when_auth_required() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let res = reqwest::get(format!("{base}/contracts")).await.unwrap();
+        assert_eq!(res.status(), 401);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn valid_key_via_x_api_key_header_allows_request() {
+        let pool = db_pool().await;
+        insert_api_key(&pool, "good-key", false).await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("{base}/contracts"))
+            .header("x-api-key", "good-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn valid_key_via_bearer_header_allows_request() {
+        let pool = db_pool().await;
+        insert_api_key(&pool, "bearer-key", false).await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("{base}/contracts"))
+            .header("Authorization", "Bearer bearer-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn revoked_key_returns_401() {
+        let pool = db_pool().await;
+        insert_api_key(&pool, "revoked-key", true).await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("{base}/contracts"))
+            .header("x-api-key", "revoked-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn unknown_key_returns_401() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("{base}/contracts"))
+            .header("x-api-key", "completely-unknown-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn rate_limit_blocks_excess_requests() {
+        let pool = db_pool().await;
+        // anon_rate=2: first two requests succeed, third hits the bucket limit.
+        let base = spawn_server(make_state(pool, false, 2)).await;
+        let client = reqwest::Client::new();
+        for _ in 0..2 {
+            let res = client
+                .get(format!("{base}/contracts"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status(), 200, "first two requests must succeed");
+        }
+        let res = client
+            .get(format!("{base}/contracts"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 429, "third request must be rate-limited");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn error_responses_have_json_error_envelope() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, true, 60)).await;
+        let res = reqwest::get(format!("{base}/contracts")).await.unwrap();
+        assert_eq!(res.status(), 401);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert!(
+            body.get("error").is_some(),
+            "error responses must carry an 'error' field: {body}"
+        );
+        assert!(
+            body["error"].is_string(),
+            "error field must be a string: {body}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn rate_limit_response_has_error_envelope() {
+        let pool = db_pool().await;
+        let base = spawn_server(make_state(pool, false, 1)).await;
+        let client = reqwest::Client::new();
+        // Exhaust the single token.
+        client.get(format!("{base}/contracts")).send().await.unwrap();
+        let res = client
+            .get(format!("{base}/contracts"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 429);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert!(body.get("error").is_some(), "429 must have error envelope");
+    }
 }

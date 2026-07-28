@@ -16,7 +16,7 @@ use serde_json::Value;
 use sqlx::types::Json as SqlxJson;
 use sqlx::PgPool;
 
-use crate::pagination;
+use crate::pagination::{self, decode_cursor};
 
 pub type AppSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 
@@ -396,6 +396,7 @@ fn build_transfer_connection(mut rows: Vec<TokenTransfer>, limit: i64) -> Transf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn cursor_round_trips() {
@@ -407,8 +408,8 @@ mod tests {
     fn bad_cursor_decodes_to_none() {
         assert_eq!(decode_cursor(None), None);
         assert_eq!(decode_cursor(Some("!!!not-base64!!!")), None);
-        // Valid base64 but wrong shape.
-        let junk = B64.encode("no-separator");
+        // Valid base64 but wrong shape (no `|` separator).
+        let junk = base64::engine::general_purpose::STANDARD.encode("no-separator");
         assert_eq!(decode_cursor(Some(&junk)), None);
     }
 

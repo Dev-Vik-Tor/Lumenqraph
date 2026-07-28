@@ -88,29 +88,25 @@ pub async fn list_events(
         .await?
     };
 
-    // Determine if there's a next page and extract the cursor.
+    // Determine if there's a next page and slice the sentinel off.
     let (has_next_page, result_events) = if q.after.is_some() && events.len() as i64 > limit {
         let mut trimmed = events;
         trimmed.truncate(limit as usize);
-        let next_cursor = trimmed
-            .last()
-            .map(|e| pagination::encode_cursor(e.ledger, &e.event_id));
         (true, trimmed)
     } else {
-        let next_cursor = events
-            .last()
-            .map(|e| pagination::encode_cursor(e.ledger, &e.event_id));
         (false, events)
+    };
+
+    let next_cursor = if has_next_page {
+        result_events
+            .last()
+            .map(|e| pagination::encode_cursor(e.ledger, &e.event_id))
+    } else {
+        None
     };
 
     Ok(Json(EventsResponse {
         data: result_events,
-        next_cursor: if has_next_page {
-            result_events
-                .last()
-                .map(|e| pagination::encode_cursor(e.ledger, &e.event_id))
-        } else {
-            None
-        },
+        next_cursor,
     }))
 }

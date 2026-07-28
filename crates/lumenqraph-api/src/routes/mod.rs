@@ -10,13 +10,12 @@ pub mod sdk;
 pub mod transfers;
 pub mod webhooks;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_graphql::http::GraphiQLSource;
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{any, delete, get, post};
 use axum::{middleware, Extension, Router};
