@@ -4,6 +4,7 @@
 pub mod contracts;
 pub mod events;
 pub mod health;
+pub mod openapi;
 pub mod proxy;
 pub mod read;
 pub mod sdk;
@@ -51,10 +52,11 @@ async fn graphiql() -> impl IntoResponse {
 pub fn router(state: AppState) -> Router {
     let schema = graphql::build_schema(state.pool.clone());
 
-    // Public, unauthenticated observability endpoints.
+    // Public, unauthenticated observability and documentation endpoints.
     let public = Router::new()
         .route("/health", get(health::health))
-        .route("/metrics", get(metrics::metrics));
+        .route("/metrics", get(metrics::metrics))
+        .merge(openapi::router());
 
     // RPC-backed routes with separate, tighter rate limiting (they hit upstream RPC).
     let rpc_routes = Router::new()
