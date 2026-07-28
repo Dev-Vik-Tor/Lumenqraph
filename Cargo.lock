@@ -1248,6 +1248,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stellar-xdr",
+ "subtle",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -1257,9 +1258,11 @@ name = "lumenqraph-indexer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "dotenvy",
  "hex",
+ "hmac",
  "lumenqraph-core",
  "reqwest",
  "serde",

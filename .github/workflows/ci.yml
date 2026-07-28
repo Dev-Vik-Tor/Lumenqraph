@@ -56,6 +56,28 @@ jobs:
           cargo test -p lumenqraph-indexer  -- --ignored --test-threads=1
           cargo test -p lumenqraph-webhooks -- --ignored --test-threads=1
           cargo test -p lumenqraph-api      -- --ignored --test-threads=1
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --no-report
+          cargo llvm-cov --no-report -p lumenqraph-indexer  -- --ignored --test-threads=1
+          cargo llvm-cov --no-report -p lumenqraph-webhooks -- --ignored --test-threads=1
+          cargo llvm-cov --no-report -p lumenqraph-api      -- --ignored --test-threads=1
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
       - name: Build (release)
         run: cargo build --workspace --release
 
