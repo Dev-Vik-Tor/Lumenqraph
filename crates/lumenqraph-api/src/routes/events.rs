@@ -34,6 +34,16 @@ pub struct EventsQuery {
     since: Option<String>,
     /// Optional time range filter: maximum timestamp (RFC3339).
     until: Option<String>,
+    /// Optional topic filter: filter by decoded_topics[0] value (e.g., topic0=transfer).
+    topic0: Option<String>,
+    /// Optional topic filter: filter by decoded_topics[1] value.
+    topic1: Option<String>,
+    /// Optional topic filter: filter by decoded_topics[2] value.
+    topic2: Option<String>,
+    /// Optional topic filter: filter by decoded_topics[3] value.
+    topic3: Option<String>,
+    /// Optional parameter filter: filter by parameter name:value (e.g., from=GXXXX).
+    param: Option<String>,
 }
 
 fn default_limit() -> i64 {
@@ -104,9 +114,14 @@ pub async fn list_events(
                AND ($4::bigint IS NULL OR ledger <= $4)
                AND ($5::timestamp IS NULL OR ledger_closed_at >= $5)
                AND ($6::timestamp IS NULL OR ledger_closed_at <= $6)
-               AND ($7::bigint IS NULL OR ledger < $7 OR (ledger = $7 AND event_id < $8))
+               AND ($7::text IS NULL OR decoded_topics @> jsonb_build_array($7::jsonb))
+               AND ($8::text IS NULL OR decoded_topics @> jsonb_build_array(jsonb_null::jsonb, $8::jsonb))
+               AND ($9::text IS NULL OR decoded_topics @> jsonb_build_array(jsonb_null::jsonb, jsonb_null::jsonb, $9::jsonb))
+               AND ($10::text IS NULL OR decoded_topics @> jsonb_build_array(jsonb_null::jsonb, jsonb_null::jsonb, jsonb_null::jsonb, $10::jsonb))
+               AND ($11::text IS NULL OR enriched @> ($11::jsonb))
+               AND ($12::bigint IS NULL OR ledger < $12 OR (ledger = $12 AND event_id < $13))
              ORDER BY ledger DESC, event_id DESC
-             LIMIT $9",
+             LIMIT $14",
         )
         .bind(&contract_id)
         .bind(&q.event_name)
@@ -114,6 +129,11 @@ pub async fn list_events(
         .bind(q.to_ledger)
         .bind(since_datetime)
         .bind(until_datetime)
+        .bind(&q.topic0)
+        .bind(&q.topic1)
+        .bind(&q.topic2)
+        .bind(&q.topic3)
+        .bind(&q.param)
         .bind(page_config.after_ledger)
         .bind(page_config.after_event_id)
         .bind(limit + 1)
@@ -133,8 +153,13 @@ pub async fn list_events(
                AND ($4::bigint IS NULL OR ledger <= $4)
                AND ($5::timestamp IS NULL OR ledger_closed_at >= $5)
                AND ($6::timestamp IS NULL OR ledger_closed_at <= $6)
+               AND ($7::text IS NULL OR decoded_topics @> jsonb_build_array($7::jsonb))
+               AND ($8::text IS NULL OR decoded_topics @> jsonb_build_array(jsonb_null::jsonb, $8::jsonb))
+               AND ($9::text IS NULL OR decoded_topics @> jsonb_build_array(jsonb_null::jsonb, jsonb_null::jsonb, $9::jsonb))
+               AND ($10::text IS NULL OR decoded_topics @> jsonb_build_array(jsonb_null::jsonb, jsonb_null::jsonb, jsonb_null::jsonb, $10::jsonb))
+               AND ($11::text IS NULL OR enriched @> ($11::jsonb))
              ORDER BY ledger DESC, event_id DESC
-             LIMIT $7 OFFSET $8",
+             LIMIT $12 OFFSET $13",
         )
         .bind(&contract_id)
         .bind(&q.event_name)
@@ -142,6 +167,11 @@ pub async fn list_events(
         .bind(q.to_ledger)
         .bind(since_datetime)
         .bind(until_datetime)
+        .bind(&q.topic0)
+        .bind(&q.topic1)
+        .bind(&q.topic2)
+        .bind(&q.topic3)
+        .bind(&q.param)
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.pool)
