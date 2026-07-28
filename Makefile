@@ -1,4 +1,4 @@
-.PHONY: help db db-down build test fmt lint indexer api webhooks backfill up down
+.PHONY: help db db-down build test test-db fmt lint indexer api webhooks backfill up down
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -13,8 +13,17 @@ db-down: ## Stop local Postgres
 build: ## Build the workspace
 	cargo build --workspace
 
-test: ## Run tests
+test: ## Run tests (unit + integration, no Postgres required)
 	cargo test --workspace
+
+test-db: ## Run Postgres-backed tests (requires TEST_DATABASE_URL or a running local Postgres)
+	@if [ -z "$$TEST_DATABASE_URL" ]; then \
+	  export TEST_DATABASE_URL=postgres://lumenqraph:lumenqraph@localhost:5432/lumenqraph; \
+	fi; \
+	cargo test -p lumenqraph-indexer  -- --ignored; \
+	cargo test -p lumenqraph-webhooks -- --ignored; \
+	cargo test -p lumenqraph-api      -- --ignored; \
+	cargo test -p lumenqraph-mcp      -- --ignored
 
 fmt: ## Format
 	cargo fmt --all

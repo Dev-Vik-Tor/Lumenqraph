@@ -3,6 +3,10 @@
 
 pub mod codegen;
 pub mod crypto;
+/// Helpers for isolated-schema Postgres tests. Gated so it compiles only when
+/// running tests (the `uuid` dep is always present in the workspace).
+#[cfg(any(test, feature = "db-test"))]
+pub mod db_test;
 pub mod diff;
 pub mod error;
 pub mod models;

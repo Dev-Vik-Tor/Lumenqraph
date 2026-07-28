@@ -64,6 +64,15 @@ impl SpecCache {
     /// `wasm_hash`. `404` when no interface is indexed (or the contract is a
     /// Stellar Asset Contract, which has no spec at all).
     pub async fn current(&self, pool: &PgPool, contract_id: &str) -> ApiResult<Arc<CachedSpec>> {
+        // In tests the cache may be pre-populated via `seed()` to avoid a DB
+        // round-trip. A seeded entry uses the sentinel hash "test-hash".
+        #[cfg(test)]
+        if let Some((hash, spec)) = self.current.read().unwrap().get(contract_id) {
+            if hash == "test-hash" {
+                return Ok(Arc::clone(spec));
+            }
+        }
+
         let row: Option<(String,)> =
             sqlx::query_as("SELECT wasm_hash FROM contract_specs WHERE contract_id = $1")
                 .bind(contract_id)
@@ -130,6 +139,17 @@ impl SpecCache {
         map.insert(key, Arc::clone(&entry));
         Ok(entry)
     }
+
+    /// Seed a pre-built spec directly into the cache, bypassing the database.
+    /// Used only in handler tests where a real Postgres connection is not needed.
+    #[cfg(test)]
+    pub fn seed(&self, contract_id: &str, spec: CachedSpec) {
+        let arc = Arc::new(spec);
+        self.current
+            .write()
+            .unwrap()
+            .insert(contract_id.to_string(), ("test-hash".to_string(), arc));
+    }
 }
 
 /// Hex-decode and parse a stored section. A section we wrote but can't read back
@@ -153,7 +173,9 @@ mod tests {
     //! These need a throwaway Postgres:
     //!
     //!   TEST_DATABASE_URL=postgres://…/lumenqraph \
-    //!     cargo test -p lumenqraph-api -- --ignored --test-threads=1
+    //!     cargo test -p lumenqraph-api -- --ignored
+    //!
+    //! Tests run in parallel — each gets its own isolated schema.
 
     use super::*;
     use sqlx::postgres::PgPoolOptions;
@@ -163,22 +185,41 @@ mod tests {
 
     async fn fixture() -> PgPool {
         let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
+        let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
             .connect(&url)
             .await
-            .expect("connect");
-        for stmt in ["DROP SCHEMA public CASCADE", "CREATE SCHEMA public"] {
-            sqlx::query(stmt)
-                .execute(&pool)
-                .await
-                .expect("reset schema");
-        }
+            .expect("connect to TEST_DATABASE_URL");
+        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            .execute(&admin)
+            .await
+            .expect("create test schema");
+        admin.close().await;
+
+        let option = format!("-c search_path={schema},public");
+        let sep = if url.contains('?') { "&" } else { "?" };
+        let schema_url = format!("{url}{sep}options={}", percent_encode(&option));
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&schema_url)
+            .await
+            .expect("connect with search_path");
         sqlx::migrate!("../../migrations")
             .run(&pool)
             .await
             .expect("migrate");
         pool
+    }
+
+    fn percent_encode(s: &str) -> String {
+        s.chars()
+            .flat_map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => vec![c],
+                c => format!("%{:02X}", c as u32).chars().collect(),
+            })
+            .collect()
     }
 
     /// A spec section (hex) exposing exactly the named zero-arg functions.
