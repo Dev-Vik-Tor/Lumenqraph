@@ -110,6 +110,7 @@ pub fn router(state: AppState) -> Router {
             post(webhooks::create_webhook).get(webhooks::list_webhooks),
         )
         .route("/webhooks/:id", delete(webhooks::delete_webhook))
+        .route("/webhooks/:id/deliveries", get(webhooks::list_webhook_deliveries))
         // GraphQL: POST executes queries, GET serves the GraphiQL IDE. Behind
         // the same auth + rate-limit middleware as the REST data routes.
         .route("/graphql", post(graphql_handler).get(graphiql))

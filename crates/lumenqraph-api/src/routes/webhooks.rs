@@ -127,3 +127,76 @@ pub async fn delete_webhook(
     }
     Ok(Json(json!({ "deleted": id })))
 }
+
+/// Delivery history row for a webhook subscription.
+type DeliveryRow = (
+    i64,                                    // id
+    String,                                 // status
+    i32,                                    // attempts
+    Option<String>,                         // last_error
+    Option<chrono::DateTime<chrono::Utc>>, // delivered_at
+    chrono::DateTime<chrono::Utc>,         // created_at
+);
+
+pub async fn list_webhook_deliveries(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    // Verify subscription exists
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webhook_subscriptions WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    if !exists {
+        return Err(ApiError::not_found("subscription not found"));
+    }
+
+    // Fetch recent deliveries with pagination (default limit 50, max 500)
+    let deliveries: Vec<DeliveryRow> = sqlx::query_as(
+        "SELECT id, status, attempts, last_error, delivered_at, created_at
+         FROM webhook_deliveries
+         WHERE subscription_id = $1
+         ORDER BY created_at DESC
+         LIMIT 50",
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Fetch summary counts
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+           COUNT(*) FILTER (WHERE status = 'delivered') as delivered_count,
+           COUNT(*) FILTER (WHERE status = 'failed') as failed_count,
+           COUNT(*) FILTER (WHERE status = 'pending') as pending_count
+         FROM webhook_deliveries
+         WHERE subscription_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let delivery_list = deliveries
+        .into_iter()
+        .map(|(id, status, attempts, last_error, delivered_at, created_at)| {
+            json!({
+                "id": id,
+                "status": status,
+                "attempts": attempts,
+                "last_error": last_error,
+                "delivered_at": delivered_at,
+                "created_at": created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "deliveries": delivery_list,
+        "summary": {
+            "delivered": counts.0,
+            "failed": counts.1,
+            "pending": counts.2,
+        }
+    })))
+}
