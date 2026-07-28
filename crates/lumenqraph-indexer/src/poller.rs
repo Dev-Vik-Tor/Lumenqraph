@@ -149,6 +149,12 @@ async fn poll_once(
         }
     }
 
+    // Record RPC metrics for this cycle
+    let (rpc_calls, rpc_errors, rpc_errors_32001) = rpc.take_metrics();
+    if rpc_calls > 0 || rpc_errors > 0 {
+        cursor::track_rpc_call(pool, rpc_calls, rpc_errors, rpc_errors_32001).await?;
+    }
+
     cursor::write_progress(pool, latest, latest, inserted).await?;
     if inserted > 0 {
         info!(inserted, up_to_ledger = latest, "indexed events");

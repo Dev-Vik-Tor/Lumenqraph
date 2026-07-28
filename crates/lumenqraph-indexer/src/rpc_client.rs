@@ -14,6 +14,10 @@ use stellar_xdr::curr::{
 pub struct RpcClient {
     http: reqwest::Client,
     url: String,
+    /// Track RPC call metrics for observability
+    pub calls_made: std::sync::atomic::AtomicU64,
+    pub calls_failed: std::sync::atomic::AtomicU64,
+    pub calls_failed_32001: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -152,6 +156,9 @@ impl RpcClient {
         Self {
             http,
             url: url.into(),
+            calls_made: std::sync::atomic::AtomicU64::new(0),
+            calls_failed: std::sync::atomic::AtomicU64::new(0),
+            calls_failed_32001: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -160,6 +167,8 @@ impl RpcClient {
         method: &str,
         params: P,
     ) -> anyhow::Result<R> {
+        self.calls_made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let req = RpcRequest {
             jsonrpc: "2.0",
             id: 1,
@@ -180,6 +189,11 @@ impl RpcClient {
             .with_context(|| format!("rpc {method} response decode failed"))?;
 
         if let Some(err) = resp.error {
+            self.calls_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Track -32001 processing limit errors separately for quota monitoring
+            if err.code == -32001 {
+                self.calls_failed_32001.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             return Err(anyhow!("rpc {method} error {}: {}", err.code, err.message));
         }
         resp.result
@@ -322,6 +336,15 @@ impl RpcClient {
             val: cd.val,
             last_modified_ledger,
         }))
+    }
+
+    /// Reset and return the accumulated RPC metrics from this client instance.
+    /// Used by the indexer to report metrics periodically.
+    pub fn take_metrics(&self) -> (u64, u64, u64) {
+        let calls = self.calls_made.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let errors = self.calls_failed.swap(0, std::sync::atomic::Ordering::Relaxed);
+        let errors_32001 = self.calls_failed_32001.swap(0, std::sync::atomic::Ordering::Relaxed);
+        (calls, errors, errors_32001)
     }
 
     /// Fetch and XDR-decode a single ledger entry by key, with the ledger it was
