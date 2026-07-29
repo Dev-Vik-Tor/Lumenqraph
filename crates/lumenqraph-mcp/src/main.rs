@@ -50,6 +50,10 @@ async fn main() -> anyhow::Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("missing DATABASE_URL")?;
     let rpc_url = std::env::var("RPC_URL")
         .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string());
+    let rpc_timeout_secs: u64 = std::env::var("RPC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(30);
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -58,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to connect to Postgres")?;
     let state = State {
         pool,
-        rpc: RpcClient::new(rpc_url),
+        rpc: RpcClient::new(rpc_url, rpc_timeout_secs),
     };
 
     info!("lumenqraph MCP server ready (stdio)");
@@ -256,7 +260,7 @@ mod tests {
             .unwrap();
         let state = State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         };
         let resp = handle(&state, msg).await;
         assert!(resp.is_none(), "notifications should not produce a response");
@@ -269,7 +273,7 @@ mod tests {
             .unwrap();
         let state = State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         };
         let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "unknown/method" });
         let resp = handle(&state, msg).await.unwrap();
@@ -284,7 +288,7 @@ mod tests {
             .unwrap();
         let state = State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         };
         let msg = json!({ "jsonrpc": "2.0", "id": 42, "method": "ping" });
         let resp = handle(&state, msg).await.unwrap();
@@ -301,7 +305,7 @@ mod tests {
             .unwrap();
         let state = State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         };
         let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let resp = handle(&state, msg).await.unwrap();
@@ -331,7 +335,7 @@ mod tests {
             .unwrap();
         let state = State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         };
         let msg = json!({
             "jsonrpc": "2.0", "id": 1,
@@ -406,7 +410,7 @@ mod tests {
             .unwrap();
         let state = State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         };
         let msg = json!({
             "jsonrpc": "2.0", "id": 5,
@@ -454,7 +458,7 @@ mod tests {
 
         State {
             pool,
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
         }
     }
 

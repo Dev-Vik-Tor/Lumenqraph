@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let rpc = RpcClient::new(config.rpc_url.clone());
+    let rpc = RpcClient::new(config.rpc_url.clone(), config.rpc_timeout_secs);
     let args: Vec<String> = std::env::args().collect();
 
     // `inspect` needs only RPC — handle it before touching the database.

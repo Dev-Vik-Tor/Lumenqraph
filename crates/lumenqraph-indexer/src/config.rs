@@ -1,7 +1,9 @@
 //! Indexer configuration, loaded from environment (see `.env.example`).
 
 use anyhow::Context;
-use crate::keys::{KeyTemplate, parse_durability};
+use serde::Deserialize;
+
+use crate::keys::{parse_durability, KeyTemplate};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -65,6 +67,11 @@ pub struct Config {
     /// reorg protection with minimal overhead. Requires careful tuning based on
     /// the RPC's reorg exposure.
     pub reorg_overlap_ledgers: i64,
+    /// Request timeout for every outbound RPC HTTP call, in seconds.
+    /// Without a timeout, a hung RPC connection blocks the poll loop
+    /// indefinitely. Default 30 matches the previous hardcoded value.
+    /// Raise for slow/paid endpoints; lower for tight liveness requirements.
+    pub rpc_timeout_secs: u64,
 }
 
 impl Config {
@@ -82,6 +89,7 @@ impl Config {
         let max_catchup_ledgers = env_parse("MAX_CATCHUP_LEDGERS", 4000)?;
         let retention_ledgers = env_parse("RETENTION_LEDGERS", 0)?;
         let reorg_overlap_ledgers = env_parse("REORG_OVERLAP_LEDGERS", 0)?;
+        let rpc_timeout_secs = env_parse("RPC_TIMEOUT_SECS", 30u64)?;
 
         // Validate and clamp PAGE_SIZE to RPC documented bounds (1–10000).
         let page_size = clamp_with_warning("PAGE_SIZE", page_size, 1, 10000);
@@ -116,6 +124,45 @@ impl Config {
             reorg_overlap_ledgers
         };
 
+        // Validate RPC_TIMEOUT_SECS minimum (must be at least 1s).
+        let rpc_timeout_secs = clamp_with_warning("RPC_TIMEOUT_SECS", rpc_timeout_secs, 1, u64::MAX);
+
+        // Parse key templates from JSON (KEY_TEMPLATES env var).
+        // We deserialize into a plain intermediate struct and then convert to
+        // KeyTemplate (which holds a non-serde stellar-xdr ContractDataDurability).
+        #[derive(Deserialize)]
+        struct KeyTemplateRaw {
+            symbol: String,
+            #[serde(default, alias = "events")]
+            event_names: Vec<String>,
+            #[serde(default, alias = "params")]
+            param_indices: Vec<usize>,
+            #[serde(default = "default_durability")]
+            durability: String,
+            label: Option<String>,
+        }
+        fn default_durability() -> String { "persistent".to_string() }
+
+        let key_templates: Vec<KeyTemplate> = std::env::var("KEY_TEMPLATES")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| -> anyhow::Result<Vec<KeyTemplate>> {
+                let raw: Vec<KeyTemplateRaw> = serde_json::from_str(&s)
+                    .map_err(|e| anyhow::anyhow!("invalid KEY_TEMPLATES JSON: {e}"))?;
+                Ok(raw
+                    .into_iter()
+                    .map(|r| KeyTemplate {
+                        symbol: r.symbol,
+                        event_names: r.event_names,
+                        param_indices: r.param_indices,
+                        durability: parse_durability(&r.durability),
+                        label: r.label,
+                    })
+                    .collect())
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(Self {
             database_url: env("DATABASE_URL")?,
             rpc_url: env("RPC_URL")?,
@@ -137,6 +184,8 @@ impl Config {
                 .unwrap_or_else(|| "persistent".to_string()),
             retention_ledgers,
             reorg_overlap_ledgers,
+            rpc_timeout_secs,
+            key_templates,
         })
     }
 }

@@ -233,7 +233,7 @@ mod tests {
             limiter: Arc::new(RateLimiter::new()),
             http_requests: Arc::new(AtomicU64::new(0)),
             // Dummy RPC — never contacted in error-path tests.
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
             specs: Arc::new(cache),
             mounts: Arc::new(vec![]),
             rpc_limiter: Arc::new(RateLimiter::new()),
@@ -413,7 +413,7 @@ mod tests {
             anon_rate_limit: 1_000_000,
             limiter: Arc::new(RateLimiter::new()),
             http_requests: Arc::new(AtomicU64::new(0)),
-            rpc: RpcClient::new("http://127.0.0.1:0"),
+            rpc: RpcClient::new("http://127.0.0.1:0", 30),
             specs: Arc::new(SpecCache::new()), // empty — will 404
             mounts: Arc::new(vec![]),
             rpc_limiter: Arc::new(RateLimiter::new()),

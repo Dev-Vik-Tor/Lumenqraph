@@ -64,9 +64,9 @@ struct SimResultItem {
 }
 
 impl RpcClient {
-    pub fn new(url: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>, timeout_secs: u64) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
         Self {
