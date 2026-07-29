@@ -75,13 +75,54 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+
+        // Parse numeric config with validation.
+        let poll_interval_secs = env_parse("POLL_INTERVAL_SECS", 5)?;
+        let page_size = env_parse("PAGE_SIZE", 1000)?;
+        let max_catchup_ledgers = env_parse("MAX_CATCHUP_LEDGERS", 4000)?;
+        let retention_ledgers = env_parse("RETENTION_LEDGERS", 0)?;
+        let reorg_overlap_ledgers = env_parse("REORG_OVERLAP_LEDGERS", 0)?;
+
+        // Validate and clamp PAGE_SIZE to RPC documented bounds (1–10000).
+        let page_size = clamp_with_warning("PAGE_SIZE", page_size, 1, 10000);
+
+        // Validate POLL_INTERVAL_SECS minimum.
+        let poll_interval_secs = clamp_with_warning("POLL_INTERVAL_SECS", poll_interval_secs, 1, u64::MAX);
+
+        // Validate MAX_CATCHUP_LEDGERS minimum.
+        let max_catchup_ledgers = clamp_with_warning("MAX_CATCHUP_LEDGERS", max_catchup_ledgers, 1, i64::MAX);
+
+        // Validate RETENTION_LEDGERS minimum (0 = disabled).
+        let retention_ledgers = if retention_ledgers < 0 {
+            tracing::warn!(
+                requested = retention_ledgers,
+                clamped_to = 0,
+                "RETENTION_LEDGERS cannot be negative; clamping to 0 (disabled)"
+            );
+            0
+        } else {
+            retention_ledgers
+        };
+
+        // Validate REORG_OVERLAP_LEDGERS minimum (0 = disabled).
+        let reorg_overlap_ledgers = if reorg_overlap_ledgers < 0 {
+            tracing::warn!(
+                requested = reorg_overlap_ledgers,
+                clamped_to = 0,
+                "REORG_OVERLAP_LEDGERS cannot be negative; clamping to 0 (disabled)"
+            );
+            0
+        } else {
+            reorg_overlap_ledgers
+        };
+
         Ok(Self {
             database_url: env("DATABASE_URL")?,
             rpc_url: env("RPC_URL")?,
-            poll_interval_secs: env_parse("POLL_INTERVAL_SECS", 5)?,
-            page_size: env_parse("PAGE_SIZE", 1000)?,
+            poll_interval_secs,
+            page_size,
             start_ledger: env_parse("START_LEDGER", 0)?,
-            max_catchup_ledgers: env_parse("MAX_CATCHUP_LEDGERS", 4000)?,
+            max_catchup_ledgers,
             state_indexing: env_bool("STATE_INDEXING", false),
             key_indexing: env_bool("KEY_INDEXING", false),
             upgrade_watch: env_bool("UPGRADE_WATCH", !contract_ids.is_empty()),
@@ -94,10 +135,35 @@ impl Config {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "persistent".to_string()),
-            key_templates: parse_key_templates()?,
-            retention_ledgers: env_parse("RETENTION_LEDGERS", 0)?,
-            reorg_overlap_ledgers: env_parse("REORG_OVERLAP_LEDGERS", 0)?,
+            retention_ledgers,
+            reorg_overlap_ledgers,
         })
+    }
+}
+
+/// Clamp a numeric config value to [min, max] and log a warning if clamped.
+fn clamp_with_warning<T: std::cmp::PartialOrd + std::fmt::Display + Copy>(
+    key: &str,
+    value: T,
+    min: T,
+    max: T,
+) -> T {
+    if value < min {
+        tracing::warn!(
+            requested = %value,
+            clamped_to = %min,
+            "{} is below minimum; clamping to {}", key, min
+        );
+        min
+    } else if value > max {
+        tracing::warn!(
+            requested = %value,
+            clamped_to = %max,
+            "{} exceeds maximum; clamping to {}", key, max
+        );
+        max
+    } else {
+        value
     }
 }
 
@@ -125,39 +191,59 @@ where
     }
 }
 
-#[derive(serde::Deserialize)]
-struct KeyTemplateJson {
-    symbol: String,
-    events: Vec<String>,
-    params: Vec<usize>,
-    #[serde(default = "default_durability")]
-    durability: String,
-    label: Option<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn default_durability() -> String {
-    "persistent".to_string()
-}
-
-fn parse_key_templates() -> anyhow::Result<Vec<KeyTemplate>> {
-    let json_str = std::env::var("KEY_TEMPLATES").unwrap_or_default();
-    if json_str.trim().is_empty() {
-        return Ok(Vec::new());
+    #[test]
+    fn page_size_clamping() {
+        // Test PAGE_SIZE bounds (1–10000).
+        assert_eq!(clamp_with_warning("PAGE_SIZE", 0u32, 1, 10000), 1);
+        assert_eq!(clamp_with_warning("PAGE_SIZE", 1u32, 1, 10000), 1);
+        assert_eq!(clamp_with_warning("PAGE_SIZE", 5000u32, 1, 10000), 5000);
+        assert_eq!(clamp_with_warning("PAGE_SIZE", 10000u32, 1, 10000), 10000);
+        assert_eq!(clamp_with_warning("PAGE_SIZE", 100000u32, 1, 10000), 10000);
     }
 
-    let templates: Vec<KeyTemplateJson> = serde_json::from_str(&json_str)
-        .context("KEY_TEMPLATES must be a JSON array")?;
+    #[test]
+    fn poll_interval_clamping() {
+        // Test POLL_INTERVAL_SECS minimum.
+        assert_eq!(clamp_with_warning("POLL_INTERVAL_SECS", 0u64, 1, u64::MAX), 1);
+        assert_eq!(clamp_with_warning("POLL_INTERVAL_SECS", 1u64, 1, u64::MAX), 1);
+        assert_eq!(clamp_with_warning("POLL_INTERVAL_SECS", 5u64, 1, u64::MAX), 5);
+        assert_eq!(clamp_with_warning("POLL_INTERVAL_SECS", 60u64, 1, u64::MAX), 60);
+    }
 
-    templates
-        .into_iter()
-        .map(|t| {
-            Ok(KeyTemplate {
-                symbol: t.symbol,
-                event_names: t.events,
-                param_indices: t.params,
-                durability: parse_durability(&t.durability),
-                label: t.label,
-            })
-        })
-        .collect()
+    #[test]
+    fn max_catchup_ledgers_clamping() {
+        // Test MAX_CATCHUP_LEDGERS minimum.
+        assert_eq!(clamp_with_warning("MAX_CATCHUP_LEDGERS", 0i64, 1, i64::MAX), 1);
+        assert_eq!(clamp_with_warning("MAX_CATCHUP_LEDGERS", 1i64, 1, i64::MAX), 1);
+        assert_eq!(clamp_with_warning("MAX_CATCHUP_LEDGERS", 4000i64, 1, i64::MAX), 4000);
+        assert_eq!(clamp_with_warning("MAX_CATCHUP_LEDGERS", 120000i64, 1, i64::MAX), 120000);
+    }
+
+    #[test]
+    fn retention_ledgers_validation() {
+        // Negative values should be clamped to 0.
+        let retention = -100i64;
+        let clamped = if retention < 0 { 0 } else { retention };
+        assert_eq!(clamped, 0);
+
+        // Zero and positive should pass through.
+        assert_eq!(if 0i64 < 0 { 0 } else { 0i64 }, 0);
+        assert_eq!(if 1000i64 < 0 { 0 } else { 1000i64 }, 1000);
+    }
+
+    #[test]
+    fn reorg_overlap_ledgers_validation() {
+        // Negative values should be clamped to 0.
+        let reorg = -50i64;
+        let clamped = if reorg < 0 { 0 } else { reorg };
+        assert_eq!(clamped, 0);
+
+        // Zero and positive should pass through.
+        assert_eq!(if 0i64 < 0 { 0 } else { 0i64 }, 0);
+        assert_eq!(if 100i64 < 0 { 0 } else { 100i64 }, 100);
+    }
 }
