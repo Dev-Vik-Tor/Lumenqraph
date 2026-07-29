@@ -12,6 +12,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Verify MSRV declared in Cargo.toml
+  msrv-check:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Extract MSRV from Cargo.toml
+        id: msrv
+        run: |
+          MSRV=$(grep -m1 'rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$MSRV" >> $GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Build on MSRV
+        run: cargo build --workspace --all-targets
+      - name: Check on MSRV
+        run: cargo check --workspace --all-targets
+
   build-test:
     runs-on: ubuntu-latest
     services:
