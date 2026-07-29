@@ -411,6 +411,95 @@ mod tests {
         let corrupted = String::from_utf8(corrupted).unwrap();
         assert!(!is_valid_contract_id(&corrupted), "bad CRC rejected");
     }
+
+    #[test]
+    fn strkey_bad_crc() {
+        // Flip a byte in the payload to corrupt the checksum.
+        let mut bytes = vec![VERSION_CONTRACT];
+        bytes.extend_from_slice(&[0u8; 32]);
+        let crc = crc16_xmodem(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        let valid = base32_encode(&bytes);
+
+        // Now corrupt a payload byte.
+        let mut corrupted_bytes = vec![VERSION_CONTRACT];
+        let mut payload = [0u8; 32];
+        payload[0] = 0xFF; // flip first payload byte
+        corrupted_bytes.extend_from_slice(&payload);
+        corrupted_bytes.extend_from_slice(&crc.to_le_bytes()); // keep old CRC
+        let corrupted = base32_encode(&corrupted_bytes);
+
+        assert!(is_valid_contract_id(&valid), "valid key should pass");
+        assert!(!is_valid_contract_id(&corrupted), "corrupted CRC should fail");
+    }
+
+    #[test]
+    fn strkey_truncated_input() {
+        let valid = strkey(VERSION_CONTRACT, &[0u8; 32]);
+        // Truncate to various lengths.
+        assert!(!is_valid_contract_id(&valid[..10]), "truncated strkey rejected");
+        assert!(!is_valid_contract_id(&valid[..30]), "truncated strkey rejected");
+        assert!(!is_valid_contract_id(&valid[..55]), "truncated strkey rejected");
+        assert!(!is_valid_contract_id(""), "empty strkey rejected");
+    }
+
+    #[test]
+    fn strkey_overlength_input() {
+        let valid = strkey(VERSION_CONTRACT, &[0u8; 32]);
+        // Add extra characters.
+        assert!(!is_valid_contract_id(&format!("{valid}A")), "overlength rejected");
+        assert!(!is_valid_contract_id(&format!("{valid}AAAA")), "overlength rejected");
+    }
+
+    #[test]
+    fn strkey_wrong_version_byte() {
+        // G-strkey (account, version 0x30) with C payload should fail.
+        let g_key = strkey(VERSION_ACCOUNT, &[0u8; 32]);
+        assert!(!is_valid_contract_id(&g_key), "G-strkey rejected as contract ID");
+        assert_eq!(g_key.chars().next().unwrap(), 'G', "G-strkey starts with G");
+
+        // C-strkey (contract, version 0x10) should pass.
+        let c_key = strkey(VERSION_CONTRACT, &[0u8; 32]);
+        assert!(is_valid_contract_id(&c_key), "C-strkey accepted");
+        assert_eq!(c_key.chars().next().unwrap(), 'C', "C-strkey starts with C");
+    }
+
+    #[test]
+    fn strkey_roundtrip_g_and_c() {
+        // Valid G-strkey (ed25519 public key).
+        let g_payload = [1u8; 32];
+        let g_key = strkey(VERSION_ACCOUNT, &g_payload);
+        assert_eq!(g_key.len(), 56, "G-strkey is 56 chars");
+        assert!(g_key.starts_with('G'), "G-strkey starts with G");
+
+        // Valid C-strkey (contract ID).
+        let c_payload = [2u8; 32];
+        let c_key = strkey(VERSION_CONTRACT, &c_payload);
+        assert_eq!(c_key.len(), 56, "C-strkey is 56 chars");
+        assert!(c_key.starts_with('C'), "C-strkey starts with C");
+        assert!(is_valid_contract_id(&c_key), "C-strkey validates");
+    }
+
+    #[test]
+    fn strkey_invalid_base32_chars() {
+        let valid = strkey(VERSION_CONTRACT, &[0u8; 32]);
+        // Replace chars with invalid base32 characters.
+        let mut invalid = valid.clone();
+        invalid.replace_range(10..11, "0"); // '0' not in base32 alphabet
+        assert!(!is_valid_contract_id(&invalid), "invalid char '0'");
+
+        let mut invalid2 = valid.clone();
+        invalid2.replace_range(15..16, "1"); // '1' not in base32 alphabet
+        assert!(!is_valid_contract_id(&invalid2), "invalid char '1'");
+
+        let mut invalid3 = valid.clone();
+        invalid3.replace_range(20..21, "8"); // '8' not in base32 alphabet
+        assert!(!is_valid_contract_id(&invalid3), "invalid char '8'");
+
+        let mut invalid4 = valid;
+        invalid4.replace_range(25..26, "!"); // '!' not in base32 alphabet
+        assert!(!is_valid_contract_id(&invalid4), "invalid char '!'");
+    }
 }
 
 // ---- Property / fuzz tests -----------------------------------------------

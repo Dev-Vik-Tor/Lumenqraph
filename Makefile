@@ -1,4 +1,4 @@
-.PHONY: help db db-down build test test-db fmt lint indexer api webhooks backfill up down
+.PHONY: help db db-down seed build test test-db fmt lint indexer api webhooks backfill up down
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -9,6 +9,12 @@ db: ## Start local Postgres
 
 db-down: ## Stop local Postgres
 	docker compose down
+
+seed: ## Populate demo dataset for local exploration
+	@if [ -z "$$DATABASE_URL" ]; then \
+	  export DATABASE_URL=postgres://lumenqraph:lumenqraph@localhost:5432/lumenqraph; \
+	fi; \
+	psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/seed.sql
 
 build: ## Build the workspace
 	cargo build --workspace

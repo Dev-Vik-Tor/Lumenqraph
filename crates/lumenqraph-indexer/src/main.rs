@@ -73,6 +73,34 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to connect to Postgres")?;
 
+    // Acquire a Postgres advisory lock to prevent concurrent indexer instances
+    // from both running migrations and polling. Only one indexer can be active;
+    // others will block here and become hot standbys that take over on failure.
+    const INDEXER_LOCK_ID: i64 = 0x6c756d656e717261; // "lumenqra" as i64
+    info!("acquiring indexer leader lock (id {})", INDEXER_LOCK_ID);
+    let lock_acquired = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_lock($1)"
+    )
+    .bind(INDEXER_LOCK_ID)
+    .fetch_one(&pool)
+    .await
+    .context("failed to acquire advisory lock")?;
+
+    if !lock_acquired {
+        info!(
+            "another indexer instance holds the leader lock; \
+             blocking until it releases (this instance will become a hot standby)"
+        );
+        // Blocking wait for the lock.
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(INDEXER_LOCK_ID)
+            .execute(&pool)
+            .await
+            .context("failed to acquire advisory lock (blocking)")?;
+    }
+
+    info!("indexer leader lock acquired; this instance is now active");
+
     sqlx::migrate!("../../migrations")
         .run(&pool)
         .await
@@ -84,13 +112,31 @@ async fn main() -> anyhow::Result<()> {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(config.start_ledger);
         info!(from, "running in backfill mode");
-        return backfill::run(pool, rpc, config, from).await;
+        let result = backfill::run(pool.clone(), rpc, config, from).await;
+        
+        // Release the advisory lock on exit.
+        info!("releasing indexer leader lock");
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(INDEXER_LOCK_ID)
+            .execute(&pool)
+            .await;
+        
+        return result;
     }
 
     // deep-backfill: ingest beyond the RPC retention window from a data-lake
     // source. Parse manual args: --from, --to, --source, --input (repeatable).
     if args.get(1).map(String::as_str) == Some("deep-backfill") {
-        return run_deep_backfill(args, pool, config).await;
+        let result = run_deep_backfill(args, pool.clone(), config).await;
+        
+        // Release the advisory lock on exit.
+        info!("releasing indexer leader lock");
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(INDEXER_LOCK_ID)
+            .execute(&pool)
+            .await;
+        
+        return result;
     }
 
     info!(
@@ -99,7 +145,16 @@ async fn main() -> anyhow::Result<()> {
         poll_secs = config.poll_interval_secs,
         "starting lumenqraph indexer (live)"
     );
-    poller::run(pool, rpc, config).await
+    let result = poller::run(pool.clone(), rpc, config).await;
+
+    // Release the advisory lock on shutdown.
+    info!("releasing indexer leader lock");
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(INDEXER_LOCK_ID)
+        .execute(&pool)
+        .await;
+
+    result
 }
 
 fn env_parse_u32(key: &str, default: u32) -> u32 {
