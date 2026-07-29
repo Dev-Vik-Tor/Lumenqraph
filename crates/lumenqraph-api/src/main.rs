@@ -6,6 +6,7 @@ mod auth;
 mod error;
 mod graphql;
 mod metrics;
+mod openapi;
 mod pagination;
 mod rate_limit;
 mod request_id;
@@ -23,6 +24,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http;
 use axum::middleware;
 use sqlx::postgres::PgPoolOptions;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -131,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = routes::router(state)
         .layer(DefaultBodyLimit::max(max_body_bytes as usize))
-        .layer(middleware::from_fn(request_id::request_id_middleware))
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer);
 
