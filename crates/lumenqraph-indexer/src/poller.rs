@@ -149,6 +149,12 @@ async fn poll_once(
         }
     }
 
+    // Record RPC metrics for this cycle
+    let (rpc_calls, rpc_errors, rpc_errors_32001) = rpc.take_metrics();
+    if rpc_calls > 0 || rpc_errors > 0 {
+        cursor::track_rpc_call(pool, rpc_calls, rpc_errors, rpc_errors_32001).await?;
+    }
+
     cursor::write_progress(pool, latest, latest, inserted).await?;
     if inserted > 0 {
         info!(inserted, up_to_ledger = latest, "indexed events");
@@ -171,6 +177,8 @@ pub async fn fetch_and_store(
 ) -> anyhow::Result<u64> {
     let mut cursor_token: Option<String> = None;
     let mut total_inserted = 0u64;
+    let mut enriched_count = 0u64;
+    let mut not_enriched_count = 0u64;
     // Contracts seen this cycle, used to bound per-contract instance reads when
     // no explicit CONTRACT_IDS list does it for us.
     let mut active_contracts: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -199,6 +207,12 @@ pub async fn fetch_and_store(
                 active_contracts.insert(ev.contract_id.clone());
             }
             let new_event = to_new_event(ev, spec.as_deref());
+            // Track enrichment coverage: count enriched vs not-enriched events
+            if new_event.enriched.is_some() {
+                enriched_count += 1;
+            } else {
+                not_enriched_count += 1;
+            }
             // Discover holder addresses to snapshot per-key balances for.
             if config.key_indexing {
                 for holder in keys::holders_in_event(&new_event) {
@@ -217,6 +231,11 @@ pub async fn fetch_and_store(
         if n < config.page_size as usize || cursor_token.is_none() {
             break;
         }
+    }
+
+    // Record enrichment metrics for this cycle
+    if enriched_count > 0 || not_enriched_count > 0 {
+        cursor::track_enrichment(pool, enriched_count, not_enriched_count).await?;
     }
 
     // Read each tracked contract's instance entry. With an explicit CONTRACT_IDS
@@ -285,6 +304,8 @@ async fn fetch_and_upsert(
 ) -> anyhow::Result<u64> {
     let mut cursor_token: Option<String> = None;
     let mut total_updated = 0u64;
+    let mut enriched_count = 0u64;
+    let mut not_enriched_count = 0u64;
 
     loop {
         let page = rpc
@@ -300,10 +321,20 @@ async fn fetch_and_upsert(
         for ev in &page.events {
             // Stop if we've moved past the reorg window.
             if ev.ledger > end {
+                // Record enrichment metrics for reorg scan
+                if enriched_count > 0 || not_enriched_count > 0 {
+                    let _ = cursor::track_enrichment(pool, enriched_count, not_enriched_count).await;
+                }
                 return Ok(total_updated);
             }
             let spec = specs.get(pool, rpc, &ev.contract_id).await;
             let new_event = to_new_event(ev, spec.as_deref());
+            // Track enrichment coverage: count enriched vs not-enriched events
+            if new_event.enriched.is_some() {
+                enriched_count += 1;
+            } else {
+                not_enriched_count += 1;
+            }
             batch.push(new_event);
         }
 
@@ -317,6 +348,11 @@ async fn fetch_and_upsert(
         if n < config.page_size as usize || cursor_token.is_none() {
             break;
         }
+    }
+
+    // Record enrichment metrics for reorg scan
+    if enriched_count > 0 || not_enriched_count > 0 {
+        cursor::track_enrichment(pool, enriched_count, not_enriched_count).await?;
     }
 
     Ok(total_updated)
@@ -377,13 +413,12 @@ mod tests {
         let clamped = start_ledger.max(oldest_available);
         assert_eq!(clamped, oldest_available);
 
-        // Verify MAX_LOOKBACK_LEDGERS is approximately 7 days
-        let ledgers_per_sec = 1.0 / 5.0; // ~5 seconds per ledger
-        let secs_per_minute = 60.0;
-        let secs_per_day = 86400.0;
+        // Verify MAX_LOOKBACK_LEDGERS is approximately 7 days.
+        // ~5 seconds per ledger, 86400 seconds per day.
+        let secs_per_day = 86400.0_f64;
         let approx_days = (MAX_LOOKBACK_LEDGERS as f64) * 5.0 / secs_per_day;
         assert!(
-            approx_days >= 6.5 && approx_days <= 7.5,
+            (6.5_f64..=7.5_f64).contains(&approx_days),
             "MAX_LOOKBACK_LEDGERS should be ~7 days, got ~{:.1} days",
             approx_days
         );

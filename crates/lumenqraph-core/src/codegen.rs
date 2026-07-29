@@ -177,7 +177,13 @@ impl Gen<'_> {
     /// inlined so the two can't collide.
     fn alias(&mut self, name: &'static str) -> String {
         if self.has_udt(name) {
-            let (_, def, _) = ALIASES.iter().find(|(n, _, _)| *n == name).unwrap();
+            // `alias()` is only called with names that appear in ALIASES; the
+            // find is always infallible.
+            #[allow(clippy::expect_used)]
+            let (_, def, _) = ALIASES
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .expect("name is always an ALIASES key; callers only pass ALIASES names");
             return (*def).to_string();
         }
         self.used.insert(name);

@@ -62,6 +62,12 @@ async fn enqueue_events(pool: &PgPool, batch: i64) -> anyhow::Result<u64> {
     }
     let upper = (last_seq + batch).min(global_max);
 
+    // Wrap the INSERT and watermark UPDATE atomically so a crash between the two
+    // can never leave deliveries inserted without the watermark advanced.
+    // ON CONFLICT DO NOTHING remains as defense-in-depth for any duplicate that
+    // could theoretically arrive via a concurrent enqueue.
+    let mut tx = pool.begin().await?;
+
     let created = sqlx::query(
         "INSERT INTO webhook_deliveries (subscription_id, event_id)
          SELECT s.id, e.event_id
@@ -76,14 +82,16 @@ async fn enqueue_events(pool: &PgPool, batch: i64) -> anyhow::Result<u64> {
     )
     .bind(last_seq)
     .bind(upper)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
 
     sqlx::query("UPDATE webhook_state SET last_seq = $1 WHERE id = 1")
         .bind(upper)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     if created > 0 {
         debug!(created, up_to_seq = upper, "enqueued webhook deliveries");
@@ -118,6 +126,11 @@ async fn enqueue_upgrades(pool: &PgPool, batch: i64) -> anyhow::Result<u64> {
     }
     let upper = (last_id + batch).min(global_max);
 
+    // Atomic: deliveries and watermark advance commit together so a crash cannot
+    // skip or duplicate upgrade deliveries. ON CONFLICT DO NOTHING is retained
+    // as defense-in-depth.
+    let mut tx = pool.begin().await?;
+
     let created = sqlx::query(
         "INSERT INTO webhook_deliveries (subscription_id, upgrade_id)
          SELECT s.id, v.id
@@ -133,14 +146,16 @@ async fn enqueue_upgrades(pool: &PgPool, batch: i64) -> anyhow::Result<u64> {
     )
     .bind(last_id)
     .bind(upper)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
 
     sqlx::query("UPDATE webhook_state SET last_upgrade_id = $1 WHERE id = 1")
         .bind(upper)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     if created > 0 {
         info!(created, up_to_id = upper, "enqueued upgrade webhooks");

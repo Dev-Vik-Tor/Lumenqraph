@@ -104,7 +104,9 @@ testnet is a scratch network, nobody needs deep history there).
       only if the read-only chain data is meant to be public.
 - [ ] `ANON_RATE_LIMIT_PER_MIN` tuned (default 60/min/IP; per-instance — see below).
 - [ ] Indexer pinned 24/7 (`auto_stop_machines=false`, `min_machines_running=1`).
-- [ ] Scrape `/metrics`; alert on `lumenqraph_indexer_lag_ledgers`.
+- [ ] Scrape `/metrics`; alert on lag (`lumenqraph_indexer_lag_seconds` > 600s for warning,
+      > 3600s for critical) and error rates. See the **Observability** section above
+      for recommended thresholds and key metrics.
 
 ## Postgres
 
@@ -132,8 +134,101 @@ constantly and so never idles:
 
 ## Observability
 
-Scrape `GET /metrics`. Alert on `lumenqraph_indexer_lag_ledgers` climbing (the
-indexer is falling behind) and on `lumenqraph_indexer_errors_total` rate.
+Scrape `GET /metrics`. The following are the key indexer health signals:
+
+### Lag metrics
+
+The indexer's position relative to the chain tip is exported as two metrics:
+
+- `lumenqraph_indexer_lag_ledgers` (gauge) — ledgers behind the chain tip
+  (computed as `chain_tip_ledger - last_processed_ledger`).
+- `lumenqraph_indexer_lag_seconds` (gauge) — estimated time behind in seconds,
+  derived as `lag_ledgers × ~5s/ledger`. Use this for human-friendly alerting.
+
+**Recommended alert thresholds:**
+
+- **Warning** (`lag_seconds > 600`, ~10 min): The indexer is falling behind at
+  a visible rate. Check indexer logs for errors, RPC quota issues (`rpc_errors_32001_total`),
+  or DB write latency spikes.
+- **Critical** (`lag_seconds > 3600`, ~1 hour): The indexer is stalled or has hit
+  an unrecoverable error. Immediate action needed; check error counts and logs.
+- **Sev0** (`lag_seconds > 86400`, ~24 hours): The indexer is far behind the
+  retention window; gaps in history are now unrecoverable via public RPC. This
+  requires backfill from a retaining RPC or data-lake source.
+
+### Error and enrichment metrics
+
+- `lumenqraph_indexer_errors_total` — poll-cycle errors (check rate for spikes).
+- `lumenqraph_events_enriched_total` / `lumenqraph_events_not_enriched_total` —
+  enrichment coverage (calculate `enriched / (enriched + not_enriched)` as a
+  percentage; a drop may indicate missing specs or spec-fetching issues).
+- `lumenqraph_spec_fetch_failures_total` — failed contract spec fetches.
+- `lumenqraph_rpc_errors_32001_total` — RPC quota-limit hits (indicates sustained
+  load pressure; may need higher RPC plan or longer `POLL_INTERVAL_SECS`).
+
+### Monitoring Setup
+
+Ship-ready Prometheus alert rules and Grafana dashboards are included in the
+[`monitoring/`](../monitoring/) directory:
+
+- **`prometheus_alerts.yml`** — Pre-configured alerts for indexer lag, error
+  rates, stalled state, and API health.
+- **`grafana_dashboard.json`** — Ready-to-import dashboard covering lag, event
+  ingestion rate, error rate, and API throughput.
+- **`prometheus.yml`** — Sample Prometheus config for scraping the metrics
+  endpoint.
+- **`README.md`** — Full setup and customization guide.
+
+#### Quick Start
+
+1. **Deploy Prometheus** with the alert rules:
+   ```bash
+   docker run -d \
+     -v $(pwd)/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml \
+     -v $(pwd)/monitoring/prometheus_alerts.yml:/etc/prometheus/prometheus_alerts.yml \
+     -p 9090:9090 \
+     prom/prometheus
+   ```
+
+2. **Deploy Grafana**:
+   ```bash
+   docker run -d -p 3000:3000 grafana/grafana
+   ```
+   Default login: `admin` / `admin`.
+
+3. **Add Prometheus data source** in Grafana:
+   - Settings → Data Sources → Add Prometheus
+   - URL: `http://prometheus:9090`
+
+4. **Import the dashboard**:
+   - Create → Import
+   - Upload `monitoring/grafana_dashboard.json`
+
+#### Metrics Overview
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `lumenqraph_indexer_lag_ledgers` | Gauge | Ledgers behind chain tip |
+| `lumenqraph_indexer_last_processed_ledger` | Gauge | Most recent ledger processed |
+| `lumenqraph_indexer_chain_tip_ledger` | Gauge | Latest ledger on chain |
+| `lumenqraph_indexer_ingested_total` | Counter | Total events ingested |
+| `lumenqraph_indexer_errors_total` | Counter | Total poll-cycle errors |
+| `lumenqraph_api_requests_total` | Counter | Total API requests served |
+| `lumenqraph_events_total` | Gauge | Total events in database |
+
+#### Alert Rules
+
+| Alert | Threshold | Duration | Severity |
+| --- | --- | --- | --- |
+| IndexerLagHigh | lag > 100 ledgers | 5 min | warning |
+| IndexerLagCritical | lag > 500 ledgers | 2 min | critical |
+| IndexerStalled | No ingestion × lag exists | 5 min | critical |
+| IndexerErrorRateHigh | error rate > 1% | 2 min | warning |
+| LargeLagGrowth | lag growth > 1000 ledgers/hour | 5 min | warning |
+| IngestRateLow | < 1 event/sec | 10 min | warning |
+| APINoRequests | No requests | 5 min | warning |
+
+Tune thresholds in `monitoring/prometheus_alerts.yml` to fit your SLA.
 
 ## Limits
 
