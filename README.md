@@ -12,7 +12,7 @@ Tail contract events from Soroban RPC, decode their XDR to clean JSON, store the
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![Built for Stellar](https://img.shields.io/badge/built%20for-Stellar%20Soroban-black.svg)](https://stellar.org/soroban)
 
-[Quick start](#quick-start) · [API](#api) · [Architecture](#architecture) · [Docs](docs/) · [Security](SECURITY.md) · [Roadmap](#roadmap) · [Contributing](#contributing)
+[Quick start](#quick-start) · [API](#api) · [Architecture](#architecture) · [Docs](docs/) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security](SECURITY.md) · [Roadmap](#roadmap) · [Contributing](#contributing)
 
 ### 🔭 [Live demo → lumenqraph.onrender.com](https://lumenqraph.onrender.com)
 
@@ -28,6 +28,7 @@ Indexing Stellar **mainnet** right now. Below: the [Aquarius AMM](https://aqua.n
 ## Table of contents
 
 - [Why Lumenqraph](#why-lumenqraph)
+- [Comparison with Alternatives](#comparison-with-alternatives)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Quick start](#quick-start)
@@ -47,6 +48,8 @@ Indexing Stellar **mainnet** right now. Below: the [Aquarius AMM](https://aqua.n
 - [Development](#development)
 - [Roadmap](#roadmap)
 - [Known limitations](#known-limitations)
+- [Troubleshooting & FAQ](docs/TROUBLESHOOTING.md)
+- [Explorer UI & Configuration](docs/EXPLORER.md)
 - [Security](SECURITY.md)
 - [Contributing](#contributing)
 - [License](#license)
@@ -61,6 +64,33 @@ Lumenqraph's angle is **simplicity, self-hostability, and typed decoding that ne
 - **Zero learning curve** — a plain REST API and JSON webhooks. No custom VM, no programs to write and deploy.
 - **Self-hostable and inspectable** — run it on your own infrastructure; the code is open and auditable.
 - **Decoded, not raw** — XDR is decoded to friendly JSON (addresses as `G…`/`C…` strkeys, amounts as decimal strings), with the raw base64 always retained losslessly.
+
+## Comparison with Alternatives
+
+Lumenqraph occupies a specific niche. It trades unlimited historical indexing depth (managed services) for lightweight, self-hostable, zero-compile type safety. Below is a feature-by-feature comparison vs existing Soroban/Stellar indexing solutions:
+
+| Feature / Axis | Lumenqraph | Mercury | Allium | SubQuery |
+| --- | --- | --- | --- | --- |
+| **Model** | Self-hosted | Managed Service | Managed Data Lake | Hybrid (Self / Managed) |
+| **Decoding** | WASM spec-driven (Zero ABI upload) | Custom WASM mappings | Raw XDR schemas | Custom Javascript mappings |
+| **Upgrade Watch** | Automatic semantic diffing | Manual update / tracking | N/A (raw decoding) | Manual subgraph update |
+| **Read Simulator** | Built-in `/call` read simulation | Direct RPC simulate | N/A | N/A |
+| **AI / MCP Native** | Yes (Model Context Protocol) | No | No | No |
+| **Historical Depth** | Bounded (RPC limit or data-lake) | Unlimited / Archive | Unlimited / Archive | Unlimited / Archive |
+| **Operations** | Zero-compile REST & webhooks | Managed (Zero ops) | SQL Interface (Zero ops) | Compile WASM & deploy subgraphs |
+| **Pricing** | Infrastructure costs only | Volume-based pricing | Contract pricing | Subgraph hosting fees |
+
+### Honest Tradeoffs: Where Managed Services Win
+If your project requires **deep historical event analysis** going back years, or absolute guarantee of zero server operational overhead, a managed platform is a better fit:
+- **Allium** excels at querying massive, cold, historical datasets across the entire Stellar ecosystem via SQL-based data lakes.
+- **Mercury** provides an always-on, zero-ops event database that abstracts away all server maintenance, RPC endpoints, and database connection budgets.
+
+### Where Lumenqraph Wins
+Lumenqraph is ideal for developers seeking **complete ownership of their data** and **low-latency interaction** without vendor lock-in:
+- **Zero-Configuration Type Safety**: Automatically reads on-chain metadata schemas. There are no ABI files to generate, host, or upload.
+- **Contract Upgrade Diffing**: If a contract upgrades in-place, Lumenqraph records the version transition, highlights the changes (added/removed functions, breaking changes), and dispatches webhook alerts.
+- **Integrated View-Simulation**: Simulates smart contract view calls through unified HTTP endpoints (`/call`) without needing separate Stellar SDK configuration.
+- **AI-Agent Readiness**: Connects directly to LLMs (like Claude) using the built-in MCP server for automated contract interaction.
 
 ## Features
 
