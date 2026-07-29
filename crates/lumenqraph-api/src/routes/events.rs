@@ -11,7 +11,7 @@ use axum::Json;
 use lumenqraph_core::EventRow;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::pagination;
 use crate::state::AppState;
 
@@ -44,11 +44,15 @@ pub async fn list_events(
     Path(contract_id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> ApiResult<Json<EventsResponse>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let limit = q.limit.clamp(1, 1000);
 
     // If cursor is provided, use keyset pagination; otherwise fall back to offset.
     let events: Vec<EventRow> = if let Some(ref cursor) = q.after {
-        let page_config = pagination::PaginationConfig::new(limit, Some(cursor));
+        let page_config = pagination::PaginationConfig::new(limit, Some(cursor))
+            .map_err(|e| ApiError::bad_request(format!("invalid cursor: {e}")))?;
         sqlx::query_as(
             "SELECT event_id, contract_id, ledger, ledger_closed_at, event_type,
                     topics, decoded_topics, event_name, value, decoded_value,
@@ -88,29 +92,25 @@ pub async fn list_events(
         .await?
     };
 
-    // Determine if there's a next page and extract the cursor.
+    // Determine if there's a next page and compute the cursor before consuming the vec.
     let (has_next_page, result_events) = if q.after.is_some() && events.len() as i64 > limit {
         let mut trimmed = events;
         trimmed.truncate(limit as usize);
-        let next_cursor = trimmed
-            .last()
-            .map(|e| pagination::encode_cursor(e.ledger, &e.event_id));
         (true, trimmed)
     } else {
-        let next_cursor = events
-            .last()
-            .map(|e| pagination::encode_cursor(e.ledger, &e.event_id));
         (false, events)
+    };
+
+    let next_cursor = if has_next_page {
+        result_events
+            .last()
+            .map(|e| pagination::encode_cursor(e.ledger, &e.event_id))
+    } else {
+        None
     };
 
     Ok(Json(EventsResponse {
         data: result_events,
-        next_cursor: if has_next_page {
-            result_events
-                .last()
-                .map(|e| pagination::encode_cursor(e.ledger, &e.event_id))
-        } else {
-            None
-        },
+        next_cursor,
     }))
 }

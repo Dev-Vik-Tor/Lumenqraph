@@ -1248,6 +1248,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stellar-xdr",
+ "subtle",
  "thiserror 1.0.69",
  "uuid",
 ]
@@ -1300,6 +1301,7 @@ dependencies = [
  "hex",
  "hmac",
  "lumenqraph-core",
+ "rand 0.8.7",
  "reqwest",
  "serde",
  "serde_json",

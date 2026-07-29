@@ -209,8 +209,9 @@ impl QueryRoot {
     ) -> Result<EventConnection> {
         let pool = ctx.data::<PgPool>()?;
         let limit = first.unwrap_or(20).clamp(1, 200) as i64;
-        let after = pagination::decode_cursor(after.as_deref());
-        let (after_ledger, after_id) = match after {
+        let (after_ledger, after_id) = match pagination::decode_cursor(after.as_deref())
+            .map_err(async_graphql::Error::new)?
+        {
             Some((l, id)) => (Some(l), Some(id)),
             None => (None, None),
         };
@@ -247,7 +248,9 @@ impl QueryRoot {
     ) -> Result<TransferConnection> {
         let pool = ctx.data::<PgPool>()?;
         let limit = first.unwrap_or(20).clamp(1, 200) as i64;
-        let (after_ledger, after_id) = match decode_cursor(after.as_deref()) {
+        let (after_ledger, after_id) = match pagination::decode_cursor(after.as_deref())
+            .map_err(async_graphql::Error::new)?
+        {
             Some((l, id)) => (Some(l), Some(id)),
             None => (None, None),
         };
@@ -400,16 +403,24 @@ mod tests {
     #[test]
     fn cursor_round_trips() {
         let c = pagination::encode_cursor(42, "abc");
-        assert_eq!(decode_cursor(Some(&c)), Some((42, "abc".to_string())));
+        assert_eq!(
+            pagination::decode_cursor(Some(&c)),
+            Ok(Some((42, "abc".to_string())))
+        );
     }
 
     #[test]
-    fn bad_cursor_decodes_to_none() {
-        assert_eq!(decode_cursor(None), None);
-        assert_eq!(decode_cursor(Some("!!!not-base64!!!")), None);
-        // Valid base64 but wrong shape.
-        let junk = B64.encode("no-separator");
-        assert_eq!(decode_cursor(Some(&junk)), None);
+    fn absent_cursor_gives_none() {
+        assert_eq!(pagination::decode_cursor(None), Ok(None));
+    }
+
+    #[test]
+    fn malformed_cursor_gives_error() {
+        assert!(pagination::decode_cursor(Some("!!!not-base64!!!")).is_err());
+        // Valid base64 but wrong shape — still an error, not a silent page-1 restart.
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let junk = STANDARD.encode("no-separator");
+        assert!(pagination::decode_cursor(Some(&junk)).is_err());
     }
 
     #[test]

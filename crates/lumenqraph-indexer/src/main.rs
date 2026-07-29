@@ -77,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
 
 /// Fetch a contract's deployed WASM and print its parsed interface as JSON.
 async fn inspect(rpc: &RpcClient, contract_id: &str) -> anyhow::Result<()> {
+    if !lumenqraph_core::is_valid_contract_id(contract_id) {
+        anyhow::bail!("invalid contract id {contract_id:?}: expected a C… strkey");
+    }
     let Some((wasm_hash, wasm)) = rpc.get_contract_wasm(contract_id).await? else {
         anyhow::bail!(
             "no WASM found for {contract_id} (not a contract, or a Stellar Asset Contract)"

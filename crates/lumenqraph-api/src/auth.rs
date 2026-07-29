@@ -6,10 +6,10 @@
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
 use crate::error::{ApiError, ApiResult};
@@ -24,13 +24,74 @@ pub fn hash_key(key: &str) -> String {
 
 fn extract_key(headers: &HeaderMap) -> Option<String> {
     if let Some(v) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        return Some(v.to_string());
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
     }
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
+    // RFC 7235 §2.1: the auth-scheme is case-insensitive. Split on the first
+    // space so any extra spaces in the token are preserved, then trim both ends.
+    let raw = headers.get("authorization").and_then(|v| v.to_str().ok())?;
+    let raw = raw.trim();
+    let (scheme, rest) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = rest.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue};
+
+    fn make_headers(name: &str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
+            let h = make_headers("authorization", &format!("{scheme} mytoken"));
+            assert_eq!(
+                extract_key(&h).as_deref(),
+                Some("mytoken"),
+                "failed for scheme {scheme:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        let h = make_headers("authorization", "  Bearer   mytoken  ");
+        assert_eq!(extract_key(&h).as_deref(), Some("mytoken"));
+    }
+
+    #[test]
+    fn missing_token_returns_none() {
+        assert_eq!(extract_key(&make_headers("authorization", "Bearer ")), None);
+        assert_eq!(extract_key(&make_headers("authorization", "Bearer")), None);
+    }
+
+    #[test]
+    fn x_api_key_is_extracted() {
+        let h = make_headers("x-api-key", "myapikey");
+        assert_eq!(extract_key(&h).as_deref(), Some("myapikey"));
+    }
+
+    #[test]
+    fn absent_auth_returns_none() {
+        assert_eq!(extract_key(&HeaderMap::new()), None);
+    }
 }
 
 /// Extract the client IP address, respecting X-Forwarded-For headers only when
@@ -160,7 +221,7 @@ pub async fn rpc_auth_and_rate_limit(
         }
     };
 
-    if !state.rpc_limiter.check(&identity, limit) {
+    if !state.rpc_limiter.check(&identity, limit).allowed {
         return Err(ApiError::too_many_requests());
     }
 
