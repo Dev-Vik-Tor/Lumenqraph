@@ -1,0 +1,56 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for your suggestion! Please describe the feature you'd like to see.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component would this feature affect?
+      options:
+        - lumenqraph-indexer
+        - lumenqraph-api
+        - lumenqraph-webhooks
+        - lumenqraph-mcp
+        - SDK (TypeScript)
+        - Docker/Deployment
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem does this feature solve? Is your feature request related to a problem?
+      placeholder: I'm frustrated when... / It would be helpful if...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the solution or feature you'd like
+      placeholder: I'd like to see...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you considered any alternative solutions or workarounds?
+      placeholder: I've tried... / Another approach could be...
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other context, mockups, or examples that help explain the feature

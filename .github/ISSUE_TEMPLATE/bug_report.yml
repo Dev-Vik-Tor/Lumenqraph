@@ -1,0 +1,87 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the sections below.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version of Lumenqraph are you running? (commit SHA, tag, or "main")
+      placeholder: e.g., v0.1.0, commit abc1234, or latest main
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - lumenqraph-indexer
+        - lumenqraph-api
+        - lumenqraph-webhooks
+        - lumenqraph-mcp
+        - SDK (TypeScript)
+        - Docker/Deployment
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Provide details about your environment:
+        - OS (Linux, macOS, Windows)
+        - Deployment method (Docker Compose, Fly.io, Render, bare metal)
+        - Postgres version
+        - Rust version (if building from source)
+      placeholder: |
+        OS: Ubuntu 22.04
+        Deployment: Docker Compose
+        Postgres: 16-alpine
+        Rust: 1.75.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug
+      placeholder: When I try to..., I expect..., but instead...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Start the indexer with...
+        2. Make a GraphQL query to...
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Please include any relevant error messages or logs
+      render: shell
+      placeholder: |
+        Paste logs here...
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Any other context, screenshots, or information that might help
