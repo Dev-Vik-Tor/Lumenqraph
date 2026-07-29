@@ -1,0 +1,101 @@
+groups:
+  - name: lumenqraph
+    interval: 30s
+    rules:
+      # Indexer lag alerts
+      - alert: LumenqraphIndexerLagHigh
+        expr: lumenqraph_indexer_lag_ledgers > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumenqraph indexer is {{ $value }} ledgers behind"
+          description: |
+            Indexer lag is {{ $value }} ledgers (threshold: 100).
+            The indexer may be falling behind the chain tip.
+            Check indexer logs for errors or performance issues.
+
+      - alert: LumenqraphIndexerLagCritical
+        expr: lumenqraph_indexer_lag_ledgers > 500
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lumenqraph indexer severely lagging: {{ $value }} ledgers behind"
+          description: |
+            Indexer lag is {{ $value }} ledgers (critical threshold: 500).
+            The indexer is significantly behind. Immediate investigation required.
+            Check database connectivity, RPC node status, and indexer health.
+
+      # Indexer stalled alert
+      - alert: LumenqraphIndexerStalled
+        expr: |
+          increase(lumenqraph_indexer_ingested_total[5m]) == 0
+          and
+          on(instance) lumenqraph_indexer_lag_ledgers > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lumenqraph indexer appears stalled"
+          description: |
+            No new events ingested in the last 5 minutes, but lag exists.
+            Indexer process may have crashed or be hanging.
+            Check indexer logs and process status immediately.
+
+      # Error rate alerts
+      - alert: LumenqraphIndexerErrorRateHigh
+        expr: |
+          (rate(lumenqraph_indexer_errors_total[5m]) > 0.01)
+          and
+          (increase(lumenqraph_indexer_errors_total[5m]) > 0)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumenqraph indexer error rate elevated"
+          description: |
+            Indexer error rate is {{ $value | humanizePercentage }} over last 5 minutes.
+            Check indexer logs for error details.
+
+      # Insufficient data storage alert
+      - alert: LumenqraphLargeLagGrowth
+        expr: |
+          delta(lumenqraph_indexer_lag_ledgers[1h]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumenqraph indexer lag growing rapidly"
+          description: |
+            Lag increased by {{ $value }} ledgers in the last hour.
+            Indexer throughput may be insufficient for current event volume.
+            Consider scaling indexer resources.
+
+      # Data ingestion rate too low alert
+      - alert: LumenqraphIngestRateLow
+        expr: |
+          rate(lumenqraph_indexer_ingested_total[5m]) < 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumenqraph ingestion rate is below 1 event/sec"
+          description: |
+            The indexer is processing less than 1 event per second.
+            This is unusual unless the network is very quiet.
+            Check indexer performance and logs.
+
+      # API health alerts
+      - alert: LumenqraphAPINoRequests
+        expr: |
+          increase(lumenqraph_api_requests_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumenqraph API received no requests in 5 minutes"
+          description: |
+            API endpoint has received no HTTP requests.
+            API may be unreachable or load balancer misconfigured.
+            Check API health and connectivity.
