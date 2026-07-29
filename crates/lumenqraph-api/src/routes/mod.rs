@@ -4,12 +4,15 @@
 pub mod contracts;
 pub mod events;
 pub mod health;
+pub mod liquidity;
+pub mod nfts;
 pub mod openapi;
 pub mod proxy;
 pub mod read;
 pub mod sdk;
 pub mod stats;
 pub mod stream;
+pub mod swaps;
 pub mod transfers;
 pub mod webhooks;
 
@@ -112,6 +115,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/contracts/:contract_id/transfers",
             get(transfers::list_transfers),
+        )
+        .route(
+            "/contracts/:contract_id/liquidity",
+            get(liquidity::list_liquidity_events),
+        )
+        .route(
+            "/contracts/:contract_id/nfts",
+            get(nfts::list_nft_events),
+        )
+        .route(
+            "/contracts/:contract_id/swaps",
+            get(swaps::list_swaps),
         )
         .route(
             "/webhooks",

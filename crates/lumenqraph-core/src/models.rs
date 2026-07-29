@@ -92,6 +92,50 @@ pub struct TokenTransfer {
     pub ledger_closed_at: DateTime<Utc>,
 }
 
+/// A materialized AMM swap, derived from normalized AMM swap events.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AmmSwap {
+    pub event_id: String,
+    pub contract_id: String,
+    pub sender: Option<String>,
+    pub sell_token: Option<String>,
+    pub buy_token: Option<String>,
+    pub sell_amount: String,
+    pub buy_amount: String,
+    pub raw_event_name: Option<String>,
+    pub ledger: i64,
+    pub ledger_closed_at: DateTime<Utc>,
+}
+
+/// A materialized NFT event, derived from mint/transfer/burn event shapes.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct NftEvent {
+    pub event_id: String,
+    pub contract_id: String,
+    pub event_kind: String,
+    pub from_addr: Option<String>,
+    pub to_addr: Option<String>,
+    pub token_id: String,
+    pub ledger: i64,
+    pub ledger_closed_at: DateTime<Utc>,
+}
+
+/// A materialized liquidity event, derived from deposit/withdraw event shapes.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct LiquidityEvent {
+    pub event_id: String,
+    pub contract_id: String,
+    pub event_kind: String,
+    pub provider: Option<String>,
+    pub amount_a: Option<String>,
+    pub amount_b: Option<String>,
+    pub shares: Option<String>,
+    pub raw_event_name: Option<String>,
+    pub extra_amounts: Option<Value>,
+    pub ledger: i64,
+    pub ledger_closed_at: DateTime<Utc>,
+}
+
 /// A registered webhook subscription.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WebhookSubscription {

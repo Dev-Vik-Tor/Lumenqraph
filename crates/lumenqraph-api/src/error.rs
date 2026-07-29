@@ -1,6 +1,8 @@
 //! HTTP error type so handlers and middleware can use `?` and return typed
 //! status codes.
 
+use std::fmt;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -29,9 +31,39 @@ impl ApiError {
     }
 }
 
-impl<E: Into<anyhow::Error>> From<E> for ApiError {
-    fn from(e: E) -> Self {
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        ApiError::Internal(e)
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(e: sqlx::Error) -> Self {
         ApiError::Internal(e.into())
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        ApiError::Internal(e.into())
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApiError::Status(_, msg) => write!(f, "{}", msg),
+            ApiError::Internal(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ApiError::Internal(e) => Some(e.as_ref()),
+            ApiError::Status(_, _) => None,
+        }
     }
 }
 
