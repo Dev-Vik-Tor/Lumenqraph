@@ -18,12 +18,14 @@ pub async fn openapi_json() -> impl IntoResponse {
 
 /// Serve the Swagger UI at `/docs`
 pub fn swagger_ui() -> Router {
-    SwaggerUi::new("/docs/swagger-ui").url("/openapi.json", ApiDoc::openapi())
+    SwaggerUi::new("/docs/swagger-ui")
+        .url("/openapi.json", ApiDoc::openapi())
+        .into()
 }
 
 /// Serve the Redoc UI at `/redoc`
 pub fn redoc_ui() -> Router {
-    Redoc::with_url("/redoc", ApiDoc::openapi())
+    Redoc::new(ApiDoc::openapi()).into()
 }
 
 /// OpenAPI documentation endpoint

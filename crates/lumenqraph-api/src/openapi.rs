@@ -4,11 +4,11 @@
 //! that describes all REST endpoints, parameters, and response schemas.
 
 use serde::{Deserialize, Serialize};
-use utoipa::{OpenApi, Modify};
-use utoipa::openapi::{InfoBuilder, OpenApiBuilder};
+use utoipa::{OpenApi, Modify, ToSchema};
+use utoipa::openapi::{InfoBuilder, OpenApiBuilder as UtoipaOpenApiBuilder};
 
 /// Core data types used in OpenAPI responses
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct EventResponse {
     pub event_id: String,
     pub contract_id: String,
@@ -21,7 +21,7 @@ pub struct EventResponse {
     pub decoded_value: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct TransferResponse {
     pub event_id: String,
     pub contract_id: String,
@@ -31,7 +31,7 @@ pub struct TransferResponse {
     pub ledger: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ContractResponse {
     pub contract_id: String,
     pub event_count: i64,
@@ -39,7 +39,7 @@ pub struct ContractResponse {
     pub last_seen_ledger: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ContractInterfaceResponse {
     pub contract_id: String,
     pub has_events: bool,
@@ -47,14 +47,14 @@ pub struct ContractInterfaceResponse {
     pub interface: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ContractDataResponse {
     pub contract_id: String,
     pub count: usize,
     pub keys: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct WebhookSubscriptionResponse {
     pub id: String,
     pub url: String,
@@ -64,13 +64,13 @@ pub struct WebhookSubscriptionResponse {
     pub created_at: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct MetricsResponse {
     pub http_requests_total: u64,
     pub indexer_lag_ledgers: Option<i64>,
@@ -92,7 +92,7 @@ impl OpenApiBuilder {
             ))
             .build();
 
-        let mut api = OpenApiBuilder::default()
+        let mut api = UtoipaOpenApiBuilder::default()
             .info(info)
             .build();
 

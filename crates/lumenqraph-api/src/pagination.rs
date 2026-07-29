@@ -34,12 +34,13 @@ pub struct PaginationConfig {
 
 impl PaginationConfig {
     /// Create pagination config from a limit and optional cursor.
-    pub fn new(_limit: i64, after: Option<&str>) -> Self {
+    pub fn new(_limit: i64, after: Option<&str>) -> Result<Self, &'static str> {
         let (after_ledger, after_event_id) = match decode_cursor(after) {
-            Some((l, id)) => (Some(l), Some(id)),
-            None => (None, None),
+            Ok(Some((l, id))) => (Some(l), Some(id)),
+            Ok(None) => (None, None),
+            Err(e) => return Err(e),
         };
-        Self {
+        Ok(Self {
             after_ledger,
             after_event_id,
         })

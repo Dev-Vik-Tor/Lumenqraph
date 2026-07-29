@@ -22,7 +22,16 @@ pub mod xdr;
 pub use diff::SpecDiff;
 pub use error::{Error, Result};
 pub use models::{
-    ApiKey, Contract, EventRow, IndexerStatus, NewEvent, TokenTransfer, WebhookSubscription,
+    ApiKey,
+    AmmSwap,
+    Contract,
+    EventRow,
+    IndexerStatus,
+    LiquidityEvent,
+    NewEvent,
+    NftEvent,
+    TokenTransfer,
+    WebhookSubscription,
 };
 pub use spec::ContractSpec;
 pub use xdr::is_valid_contract_id;

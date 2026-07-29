@@ -31,9 +31,10 @@ reqwest.workspace = true
 url.workspace = true
 rand = "0.8"
 base64 = "0.22"
-utoipa = { version = "4", features = ["axum", "chrono", "uuid"] }
+utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 utoipa-redoc = { version = "4", features = ["axum"] }
+futures = "0.3"
 parking_lot = "0.12"
 lru = "0.12"
 
