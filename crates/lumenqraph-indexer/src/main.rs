@@ -17,6 +17,8 @@ mod rpc_client;
 mod specs;
 mod state;
 mod store;
+#[cfg(test)]
+mod smoke;
 
 use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;

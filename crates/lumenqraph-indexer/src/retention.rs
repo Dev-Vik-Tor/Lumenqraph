@@ -269,6 +269,45 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs postgres"]
+    async fn boundary_ledger_is_kept() {
+        let pool = fixture().await;
+        // cutoff = tip - retention_ledgers = 1000 - 500 = 500.
+        // The DELETE condition is `ledger < 500` (strict less-than), so:
+        //   ledger 499 → deleted (strictly below cutoff)
+        //   ledger 500 → kept   (equal to cutoff — not strictly below)
+        //   ledger 501 → kept   (above cutoff)
+        insert_event(&pool, "below", 499).await;
+        insert_event(&pool, "at_floor", 500).await;
+        insert_event(&pool, "above", 501).await;
+
+        let deleted = prune(&pool, 1000, 500).await.expect("prune");
+        assert_eq!(deleted, 1, "only the row strictly below the cutoff is pruned");
+
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM events WHERE event_id = 'at_floor'").await,
+            1,
+            "row at ledger == cutoff must survive (condition is `ledger < cutoff`, not `<=`)"
+        );
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM events WHERE event_id = 'above'").await,
+            1,
+            "row above the cutoff must survive"
+        );
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM events WHERE event_id = 'below'").await,
+            0,
+            "row strictly below the cutoff must be removed"
+        );
+        // token_transfers cascade: the transfer for 'below' is gone, the two others remain.
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM token_transfers").await,
+            2,
+            "only the pruned event's transfer cascades away; in-window transfers survive"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
     async fn disabled_and_young_chain_are_no_ops() {
         let pool = fixture().await;
         insert_event(&pool, "old", 1).await;

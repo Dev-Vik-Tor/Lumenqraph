@@ -1286,9 +1286,11 @@ name = "lumenqraph-indexer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "dotenvy",
  "hex",
+ "hmac",
  "lumenqraph-core",
  "reqwest",
  "serde",
