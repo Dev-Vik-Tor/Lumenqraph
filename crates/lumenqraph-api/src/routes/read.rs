@@ -23,6 +23,9 @@ pub async fn list_functions(
     State(state): State<AppState>,
     Path(contract_id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let spec = state.specs.current(&state.pool, &contract_id).await?;
     Ok(Json(json!({
         "contract_id": contract_id,
@@ -48,6 +51,9 @@ pub async fn call_function(
     Path(contract_id): Path<String>,
     Json(req): Json<CallRequest>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let spec = state.specs.current(&state.pool, &contract_id).await?;
 
     let call = read::encode_call(
@@ -84,6 +90,9 @@ pub async fn simulate_call(
     Path(contract_id): Path<String>,
     Json(req): Json<CallRequest>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let spec = state.specs.current(&state.pool, &contract_id).await?;
 
     let call = read::encode_call(

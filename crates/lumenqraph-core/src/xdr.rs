@@ -233,6 +233,45 @@ fn hex(bytes: &[u8]) -> String {
 const VERSION_ACCOUNT: u8 = 6 << 3; // 'G'
 const VERSION_CONTRACT: u8 = 2 << 3; // 'C'
 
+/// Returns `true` if `s` is a well-formed Stellar contract ID (`C…` strkey).
+///
+/// Checks: 56-character length, base32 alphabet (A–Z, 2–7), version byte
+/// `0x10` (`C`), and a valid CRC16-XModem checksum over the version + payload.
+pub fn is_valid_contract_id(s: &str) -> bool {
+    // A contract strkey encodes version(1) + payload(32) + crc(2) = 35 bytes.
+    // 35 × 8 bits / 5 bits-per-char = 56 characters exactly.
+    if s.len() != 56 {
+        return false;
+    }
+    let Some(bytes) = base32_decode(s) else {
+        return false;
+    };
+    if bytes.len() != 35 {
+        return false;
+    }
+    if bytes[0] != VERSION_CONTRACT {
+        return false;
+    }
+    crc16_xmodem(&bytes[..33]) == u16::from_le_bytes([bytes[33], bytes[34]])
+}
+
+fn base32_decode(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut out = Vec::with_capacity(35);
+    for b in s.bytes() {
+        let idx = ALPHABET.iter().position(|&a| a == b)? as u32;
+        buffer = (buffer << 5) | idx;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn strkey(version: u8, payload: &[u8]) -> String {
     let mut data = Vec::with_capacity(1 + payload.len() + 2);
     data.push(version);
@@ -338,6 +377,39 @@ mod tests {
     fn malformed_falls_back_to_raw() {
         let raw = base64::engine::general_purpose::STANDARD.encode([0xff, 0xff]);
         assert_eq!(b64(&raw), serde_json::json!({ "_xdr": raw }));
+    }
+
+    #[test]
+    fn valid_contract_id_accepted() {
+        let id = strkey(VERSION_CONTRACT, &[0u8; 32]);
+        assert!(
+            is_valid_contract_id(&id),
+            "strkey-encoded C-address should be valid: {id}"
+        );
+    }
+
+    #[test]
+    fn invalid_contract_ids_rejected() {
+        let valid = strkey(VERSION_CONTRACT, &[0u8; 32]);
+
+        // Wrong length.
+        assert!(!is_valid_contract_id(&valid[..55]), "too short");
+        assert!(!is_valid_contract_id(&format!("{valid}A")), "too long");
+
+        // G-strkey (account) is not a contract ID.
+        let g_key = strkey(VERSION_ACCOUNT, &[0u8; 32]);
+        assert!(!is_valid_contract_id(&g_key), "account strkey rejected");
+
+        // Invalid base32 character.
+        let mut bad = valid.clone();
+        bad.replace_range(10..11, "0"); // '0' is not in the base32 alphabet
+        assert!(!is_valid_contract_id(&bad), "invalid char rejected");
+
+        // Corrupt the payload to invalidate the CRC.
+        let mut corrupted = valid.into_bytes();
+        corrupted[5] = if corrupted[5] == b'A' { b'B' } else { b'A' };
+        let corrupted = String::from_utf8(corrupted).unwrap();
+        assert!(!is_valid_contract_id(&corrupted), "bad CRC rejected");
     }
 }
 

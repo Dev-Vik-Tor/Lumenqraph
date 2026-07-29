@@ -21,3 +21,4 @@ pub use models::{
     ApiKey, Contract, EventRow, IndexerStatus, NewEvent, TokenTransfer, WebhookSubscription,
 };
 pub use spec::ContractSpec;
+pub use xdr::is_valid_contract_id;

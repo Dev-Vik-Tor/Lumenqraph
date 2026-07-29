@@ -53,6 +53,9 @@ pub async fn contract_interface(
     Path(contract_id): Path<String>,
     Query(q): Query<InterfaceQuery>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     if let Some(version) = q.version {
         return contract_interface_at_version(&state, &contract_id, version).await;
     }
@@ -129,6 +132,9 @@ pub async fn contract_interface_history(
     Path(contract_id): Path<String>,
     Query(q): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let limit = q.limit.clamp(1, 200);
     // (version, wasm_hash, previous_wasm_hash, diff, breaking, observed_at)
     type VersionRow = (
@@ -200,6 +206,9 @@ pub async fn contract_interface_diff(
     Path(contract_id): Path<String>,
     Query(q): Query<DiffQuery>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let latest: Option<i32> = sqlx::query_scalar(
         "SELECT max(version) FROM contract_spec_versions WHERE contract_id = $1",
     )
@@ -276,6 +285,9 @@ pub async fn contract_state(
     Path(contract_id): Path<String>,
     Query(q): Query<StateQuery>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let limit = q.limit.clamp(1, 200);
     let rows: Vec<(i64, SqlxJson<Value>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT ledger, storage, captured_at
@@ -340,6 +352,9 @@ pub async fn contract_data(
     Path(contract_id): Path<String>,
     Query(q): Query<DataQuery>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let limit = q.limit.clamp(1, 1000);
     // DISTINCT ON gives the newest row per key_hash; the outer query orders and
     // bounds the set of keys returned.
@@ -404,6 +419,9 @@ pub async fn contract_data_key(
     Path((contract_id, key_hash)): Path<(String, String)>,
     Query(q): Query<DataHistoryQuery>,
 ) -> ApiResult<Json<Value>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let limit = q.limit.clamp(1, 500);
     // (key, durability, ledger, value, label, captured_at)
     type HistRow = (

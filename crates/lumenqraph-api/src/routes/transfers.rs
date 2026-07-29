@@ -11,7 +11,7 @@ use axum::Json;
 use lumenqraph_core::TokenTransfer;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::pagination;
 use crate::state::AppState;
 
@@ -44,11 +44,15 @@ pub async fn list_transfers(
     Path(contract_id): Path<String>,
     Query(q): Query<TransfersQuery>,
 ) -> ApiResult<Json<TransfersResponse>> {
+    if !lumenqraph_core::is_valid_contract_id(&contract_id) {
+        return Err(ApiError::bad_request("invalid contract id"));
+    }
     let limit = q.limit.clamp(1, 1000);
 
     // If cursor is provided, use keyset pagination; otherwise fall back to offset.
     let transfers: Vec<TokenTransfer> = if let Some(ref cursor) = q.after {
-        let page_config = pagination::PaginationConfig::new(limit, Some(cursor));
+        let page_config = pagination::PaginationConfig::new(limit, Some(cursor))
+            .map_err(|e| ApiError::bad_request(format!("invalid cursor: {e}")))?;
         sqlx::query_as(
             "SELECT event_id, contract_id, from_addr, to_addr, amount, ledger, ledger_closed_at
              FROM token_transfers

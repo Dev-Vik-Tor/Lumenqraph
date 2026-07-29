@@ -188,7 +188,15 @@ async fn list_contracts(state: &State) -> anyhow::Result<Value> {
     Ok(json!({ "contracts": rows }))
 }
 
+fn validate_contract_id(contract_id: &str) -> anyhow::Result<()> {
+    if !lumenqraph_core::is_valid_contract_id(contract_id) {
+        anyhow::bail!("invalid contract id {contract_id:?}: expected a C… strkey");
+    }
+    Ok(())
+}
+
 async fn get_interface(state: &State, contract_id: &str) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
     let row: Option<(sqlx::types::Json<Value>, bool)> =
         sqlx::query_as("SELECT interface, has_events FROM contract_specs WHERE contract_id = $1")
             .bind(contract_id)
@@ -210,6 +218,7 @@ async fn get_upgrades(
     contract_id: &str,
     limit: Option<i64>,
 ) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
     let limit = limit.unwrap_or(20).clamp(1, 200);
     // (version, wasm_hash, previous_wasm_hash, diff, breaking, observed_at)
     type VersionRow = (
@@ -268,6 +277,7 @@ async fn get_upgrades(
 }
 
 async fn get_state(state: &State, contract_id: &str, limit: Option<i64>) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
     let limit = limit.unwrap_or(1).clamp(1, 200);
     let rows: Vec<(i64, sqlx::types::Json<Value>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT ledger, storage, captured_at
@@ -298,6 +308,7 @@ async fn get_data(
     label: Option<&str>,
     limit: Option<i64>,
 ) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
     let limit = limit.unwrap_or(100).clamp(1, 1000);
     // (key_hash, key, durability, ledger, value, label)
     type DataRow = (
@@ -346,6 +357,7 @@ async fn query_events(
     event_name: Option<&str>,
     limit: Option<i64>,
 ) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
     let limit = limit.unwrap_or(20).clamp(1, 200);
     let events: Vec<EventRow> = sqlx::query_as(
         "SELECT event_id, contract_id, ledger, ledger_closed_at, event_type,
@@ -373,6 +385,7 @@ async fn call_contract(
     source_account: Option<&str>,
     preview: bool,
 ) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
     let row: Option<(String,)> =
         sqlx::query_as("SELECT spec_section FROM contract_specs WHERE contract_id = $1")
             .bind(contract_id)
