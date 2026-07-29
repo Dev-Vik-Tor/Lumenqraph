@@ -53,19 +53,20 @@ jobs:
       # or any existing database.
       - name: Test (Postgres-backed)
         run: |
-<<<<<<< HEAD
-          cargo test -p lumenqraph-indexer  -- --ignored --test-threads=1
-          cargo test -p lumenqraph-webhooks -- --ignored --test-threads=1
-          cargo test -p lumenqraph-api      -- --ignored --test-threads=1
+          cargo test -p lumenqraph-indexer  -- --ignored
+          cargo test -p lumenqraph-webhooks -- --ignored
+          cargo test -p lumenqraph-api      -- --ignored
+          cargo test -p lumenqraph-mcp      -- --ignored
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect coverage
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov --workspace --no-report
-          cargo llvm-cov --no-report -p lumenqraph-indexer  -- --ignored --test-threads=1
-          cargo llvm-cov --no-report -p lumenqraph-webhooks -- --ignored --test-threads=1
-          cargo llvm-cov --no-report -p lumenqraph-api      -- --ignored --test-threads=1
+          cargo llvm-cov --no-report -p lumenqraph-indexer  -- --ignored
+          cargo llvm-cov --no-report -p lumenqraph-webhooks -- --ignored
+          cargo llvm-cov --no-report -p lumenqraph-api      -- --ignored
+          cargo llvm-cov --no-report -p lumenqraph-mcp      -- --ignored
           cargo llvm-cov report --lcov --output-path lcov.info
           cargo llvm-cov report --summary-only
       - name: Upload coverage to Codecov
@@ -79,12 +80,6 @@ jobs:
         with:
           name: coverage-lcov
           path: lcov.info
-=======
-          cargo test -p lumenqraph-indexer  -- --ignored
-          cargo test -p lumenqraph-webhooks -- --ignored
-          cargo test -p lumenqraph-api      -- --ignored
-          cargo test -p lumenqraph-mcp      -- --ignored
->>>>>>> pr-166
       - name: Build (release)
         run: cargo build --workspace --release
 
