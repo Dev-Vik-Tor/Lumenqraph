@@ -412,3 +412,107 @@ mod tests {
         assert!(!is_valid_contract_id(&corrupted), "bad CRC rejected");
     }
 }
+
+// ---- Property / fuzz tests -----------------------------------------------
+//
+// Acceptance criteria for #26:
+//   • The decoder never panics on arbitrary bytes — it returns an error
+//     fallback ({ "_xdr": "<base64>" }) instead.
+//   • Round-trip properties hold for well-formed values of each primitive
+//     ScVal kind.
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use base64::Engine;
+    use proptest::prelude::*;
+
+    // ---- helpers to build minimal valid XDR bytes for each ScVal kind ----
+
+    fn scval_bool(b: bool) -> Vec<u8> {
+        let mut v = SCV_BOOL.to_be_bytes().to_vec();
+        v.extend_from_slice(&(b as u32).to_be_bytes());
+        v
+    }
+
+    fn scval_u32(n: u32) -> Vec<u8> {
+        let mut v = SCV_U32.to_be_bytes().to_vec();
+        v.extend_from_slice(&n.to_be_bytes());
+        v
+    }
+
+    fn scval_i32(n: i32) -> Vec<u8> {
+        let mut v = SCV_I32.to_be_bytes().to_vec();
+        v.extend_from_slice(&n.to_be_bytes());
+        v
+    }
+
+    fn scval_u64(n: u64) -> Vec<u8> {
+        let mut v = SCV_U64.to_be_bytes().to_vec();
+        v.extend_from_slice(&n.to_be_bytes());
+        v
+    }
+
+    fn scval_i64(n: i64) -> Vec<u8> {
+        let mut v = SCV_I64.to_be_bytes().to_vec();
+        v.extend_from_slice(&n.to_be_bytes());
+        v
+    }
+
+    fn encode(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    proptest! {
+        /// Arbitrary bytes (via base64) must never panic — only return a value
+        /// or the `{ "_xdr": … }` fallback.
+        #[test]
+        fn decode_never_panics_on_arbitrary_bytes(bytes: Vec<u8>) {
+            let b64 = encode(&bytes);
+            // Must not panic.
+            let _ = decode_scval_base64(&b64);
+        }
+
+        /// decode_topics is also a public entry point; verify it stays panic-free.
+        #[test]
+        fn decode_topics_never_panics(topics: Vec<Vec<u8>>) {
+            let b64_topics: Vec<String> = topics.iter().map(|b| encode(b)).collect();
+            let _ = decode_topics(&b64_topics);
+        }
+
+        /// bool round-trip: encode as ScVal::Bool, decode, compare.
+        #[test]
+        fn bool_roundtrip(b: bool) {
+            let result = decode_scval_base64(&encode(&scval_bool(b)));
+            prop_assert_eq!(result, serde_json::Value::Bool(b));
+        }
+
+        /// u32 round-trip.
+        #[test]
+        fn u32_roundtrip(n: u32) {
+            let result = decode_scval_base64(&encode(&scval_u32(n)));
+            prop_assert_eq!(result, serde_json::json!(n));
+        }
+
+        /// i32 round-trip.
+        #[test]
+        fn i32_roundtrip(n: i32) {
+            let result = decode_scval_base64(&encode(&scval_i32(n)));
+            prop_assert_eq!(result, serde_json::json!(n));
+        }
+
+        /// u64: decoded as decimal string (JS-safe).
+        #[test]
+        fn u64_roundtrip(n: u64) {
+            let result = decode_scval_base64(&encode(&scval_u64(n)));
+            prop_assert_eq!(result, serde_json::Value::String(n.to_string()));
+        }
+
+        /// i64: decoded as decimal string.
+        #[test]
+        fn i64_roundtrip(n: i64) {
+            let result = decode_scval_base64(&encode(&scval_i64(n)));
+            prop_assert_eq!(result, serde_json::Value::String(n.to_string()));
+        }
+    }
+}

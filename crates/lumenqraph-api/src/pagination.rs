@@ -26,40 +26,22 @@ pub fn decode_cursor(cursor: Option<&str>) -> Result<Option<(i64, String)>, &'st
     Ok(Some((ledger, id.to_string())))
 }
 
-/// Pagination metadata for a result set.
-pub struct PageInfo {
-    pub has_next_page: bool,
-    pub end_cursor: Option<String>,
-}
-
-/// Configuration for pagination requests.
+/// Configuration for keyset (cursor) pagination requests.
 pub struct PaginationConfig {
-    pub limit: i64,
     pub after_ledger: Option<i64>,
     pub after_event_id: Option<String>,
 }
 
 impl PaginationConfig {
     /// Create pagination config from a limit and optional cursor.
-    ///
-    /// Returns `Err` when `after` is present but malformed; callers should
-    /// propagate this as a client error (400 / GraphQL error) rather than
-    /// silently falling back to the first page.
-    pub fn new(limit: i64, after: Option<&str>) -> Result<Self, &'static str> {
-        let (after_ledger, after_event_id) = match decode_cursor(after)? {
+    pub fn new(_limit: i64, after: Option<&str>) -> Self {
+        let (after_ledger, after_event_id) = match decode_cursor(after) {
             Some((l, id)) => (Some(l), Some(id)),
             None => (None, None),
         };
-        Ok(Self {
-            limit,
+        Self {
             after_ledger,
             after_event_id,
         })
-    }
-
-    /// Get the where clause fragment for keyset pagination.
-    /// Use this with bindings: (after_ledger, after_event_id, limit + 1)
-    pub fn where_clause() -> &'static str {
-        "($1::bigint IS NULL OR ledger < $1 OR (ledger = $1 AND event_id < $2))"
     }
 }

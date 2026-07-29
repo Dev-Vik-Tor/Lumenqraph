@@ -11,6 +11,18 @@ pub fn validate_webhook_url(url: &str) -> Result<(), String> {
         _ => return Err("url scheme must be http or https".to_string()),
     }
 
+    // url 2.5.8 (WhatWG) returns a non-empty host_str() for URLs with an empty
+    // authority (e.g. "http:///hook" → host_str() == Some("hook")).  Guard by
+    // checking the raw authority section directly: if nothing appears between
+    // "://" and the first path/query/fragment delimiter the URL has no host.
+    let after_scheme = url.get(parsed.scheme().len() + 3..).unwrap_or("");
+    let raw_host_end = after_scheme
+        .find(['/', '?', '#', ':'])
+        .unwrap_or(after_scheme.len());
+    if after_scheme[..raw_host_end].is_empty() {
+        return Err("url must have a host".to_string());
+    }
+
     if let Some(host) = parsed.host_str() {
         if host.is_empty() {
             return Err("url must have a host".to_string());
@@ -34,7 +46,13 @@ fn is_internal_address(host: &str) -> bool {
         return true;
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // url 2.5.8 returns IPv6 addresses with surrounding brackets (e.g. "[ff00::1]").
+    // Strip them so the string parses as a valid IpAddr.
+    let addr_str = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = addr_str.parse::<IpAddr>() {
         return is_reserved_ip(&ip);
     }
 

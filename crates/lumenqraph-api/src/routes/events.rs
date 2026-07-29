@@ -92,7 +92,7 @@ pub async fn list_events(
         .await?
     };
 
-    // Determine if there's a next page and compute the cursor before consuming the vec.
+    // Determine if there's a next page and slice the sentinel off.
     let (has_next_page, result_events) = if q.after.is_some() && events.len() as i64 > limit {
         let mut trimmed = events;
         trimmed.truncate(limit as usize);

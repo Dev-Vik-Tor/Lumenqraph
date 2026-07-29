@@ -377,13 +377,12 @@ mod tests {
         let clamped = start_ledger.max(oldest_available);
         assert_eq!(clamped, oldest_available);
 
-        // Verify MAX_LOOKBACK_LEDGERS is approximately 7 days
-        let ledgers_per_sec = 1.0 / 5.0; // ~5 seconds per ledger
-        let secs_per_minute = 60.0;
-        let secs_per_day = 86400.0;
+        // Verify MAX_LOOKBACK_LEDGERS is approximately 7 days.
+        // ~5 seconds per ledger, 86400 seconds per day.
+        let secs_per_day = 86400.0_f64;
         let approx_days = (MAX_LOOKBACK_LEDGERS as f64) * 5.0 / secs_per_day;
         assert!(
-            approx_days >= 6.5 && approx_days <= 7.5,
+            (6.5_f64..=7.5_f64).contains(&approx_days),
             "MAX_LOOKBACK_LEDGERS should be ~7 days, got ~{:.1} days",
             approx_days
         );
