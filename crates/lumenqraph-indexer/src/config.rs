@@ -1,6 +1,7 @@
 //! Indexer configuration, loaded from environment (see `.env.example`).
 
 use anyhow::Context;
+use crate::keys::{KeyTemplate, parse_durability};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -39,6 +40,11 @@ pub struct Config {
     /// Durability of the balance storage entry: "persistent" (default) or
     /// "temporary".
     pub balance_key_durability: String,
+    /// Configurable key templates for per-key state indexing (JSON array).
+    /// Format: [{"symbol":"Balance","events":["transfer","mint"],"params":[1,2],"durability":"persistent","label":"balance"}]
+    /// Each template defines: symbol (storage key variant), events (triggering event names),
+    /// params (topic indices to extract), durability (persistent/temporary), label (optional grouping tag).
+    pub key_templates: Vec<KeyTemplate>,
     /// Keep only the last N ledgers of history, pruning older rows as the tip
     /// advances. 0 (default) => keep everything. Set this when the database has
     /// a hard size cap (e.g. a 500MB free tier) that an unbounded index would
@@ -88,6 +94,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "persistent".to_string()),
+            key_templates: parse_key_templates()?,
             retention_ledgers: env_parse("RETENTION_LEDGERS", 0)?,
             reorg_overlap_ledgers: env_parse("REORG_OVERLAP_LEDGERS", 0)?,
         })
@@ -116,4 +123,41 @@ where
             .map_err(|e| anyhow::anyhow!("invalid {key}: {e}")),
         _ => Ok(default),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct KeyTemplateJson {
+    symbol: String,
+    events: Vec<String>,
+    params: Vec<usize>,
+    #[serde(default = "default_durability")]
+    durability: String,
+    label: Option<String>,
+}
+
+fn default_durability() -> String {
+    "persistent".to_string()
+}
+
+fn parse_key_templates() -> anyhow::Result<Vec<KeyTemplate>> {
+    let json_str = std::env::var("KEY_TEMPLATES").unwrap_or_default();
+    if json_str.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let templates: Vec<KeyTemplateJson> = serde_json::from_str(&json_str)
+        .context("KEY_TEMPLATES must be a JSON array")?;
+
+    templates
+        .into_iter()
+        .map(|t| {
+            Ok(KeyTemplate {
+                symbol: t.symbol,
+                event_names: t.events,
+                param_indices: t.params,
+                durability: parse_durability(&t.durability),
+                label: t.label,
+            })
+        })
+        .collect()
 }

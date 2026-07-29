@@ -173,6 +173,74 @@ pub async fn snapshot_balances_batch(
     }
 }
 
+/// Snapshot per-key entries from configurable templates discovered during a cycle.
+/// Keys are chunked to MAX_BATCH_KEYS entries per RPC call.
+pub async fn snapshot_template_keys_batch(
+    pool: &PgPool,
+    rpc: &RpcClient,
+    template_keys_by_contract: &std::collections::HashMap<String, Vec<(usize, Vec<String>)>>,
+    contract_ids_filter: &[String],
+    templates: &[crate::keys::KeyTemplate],
+) {
+    // Build the flat list of (contract_id, key, durability, label) to fetch.
+    let mut batch: Vec<(String, ScVal, ContractDataDurability, Option<String>)> = Vec::new();
+    for (contract_id, entries) in template_keys_by_contract {
+        if !contract_ids_filter.is_empty() && !contract_ids_filter.contains(contract_id) {
+            continue;
+        }
+        for (template_idx, params) in entries {
+            if let Some(template) = templates.get(*template_idx) {
+                match template.build_key(params) {
+                    Ok(key) => batch.push((
+                        contract_id.clone(),
+                        key,
+                        template.durability,
+                        template.label.clone(),
+                    )),
+                    Err(e) => debug!(error = %e, "skipping unbuildable template key"),
+                }
+            }
+        }
+    }
+
+    if batch.is_empty() {
+        return;
+    }
+
+    debug!(count = batch.len(), "batching template key snapshots");
+
+    for chunk in batch.chunks(MAX_BATCH_KEYS) {
+        let rpc_keys: Vec<(String, ScVal, ContractDataDurability)> = chunk
+            .iter()
+            .map(|(cid, key, dur, _)| (cid.clone(), key.clone(), *dur))
+            .collect();
+
+        let results = match rpc.get_contract_data_batch(&rpc_keys).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "batch contract-data fetch failed");
+                continue;
+            }
+        };
+
+        for ((contract_id, key, dur, label), entry_opt) in chunk.iter().zip(results.iter()) {
+            let Some(entry) = entry_opt else { continue };
+            if let Err(e) = try_write_snapshot_data(
+                pool,
+                contract_id,
+                key,
+                *dur,
+                label.as_deref(),
+                entry,
+            )
+            .await
+            {
+                warn!(contract_id = %contract_id, error = %e, "contract-data snapshot write failed");
+            }
+        }
+    }
+}
+
 /// Write a single contract-data snapshot row after change detection. Shared by
 /// the per-entry path (`try_snapshot_data`) and the batch path (`snapshot_balances_batch`).
 async fn try_write_snapshot_data(

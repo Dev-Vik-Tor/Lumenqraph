@@ -189,6 +189,11 @@ pub async fn fetch_and_store(
         String,
         std::collections::HashSet<String>,
     > = std::collections::HashMap::new();
+    // contract -> (template_index, key_params) for per-key template snapshots.
+    let mut template_keys_by_contract: std::collections::HashMap<
+        String,
+        Vec<(usize, Vec<String>)>,
+    > = std::collections::HashMap::new();
     loop {
         let page = rpc
             .get_events(
@@ -220,6 +225,15 @@ pub async fn fetch_and_store(
                         .entry(new_event.contract_id.clone())
                         .or_default()
                         .insert(holder);
+                }
+            }
+            // Discover keys from custom templates.
+            for (idx, template) in config.key_templates.iter().enumerate() {
+                for params in template.keys_from_event(&new_event) {
+                    template_keys_by_contract
+                        .entry(new_event.contract_id.clone())
+                        .or_default()
+                        .push((idx, params));
                 }
             }
             batch.push(new_event);
@@ -274,6 +288,17 @@ pub async fn fetch_and_store(
             &config.contract_ids,
             &config.balance_key_symbol,
             durability,
+        )
+        .await;
+    }
+    // Snapshot per-key entries from custom templates.
+    if !template_keys_by_contract.is_empty() {
+        state::snapshot_template_keys_batch(
+            pool,
+            rpc,
+            &template_keys_by_contract,
+            &config.contract_ids,
+            &config.key_templates,
         )
         .await;
     }
