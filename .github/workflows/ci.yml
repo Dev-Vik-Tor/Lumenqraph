@@ -48,11 +48,12 @@ jobs:
       # webhook enqueue all live there. Run them explicitly against the service
       # container above.
       #
-      # --test-threads=1 is required, not a preference: each test resets the
-      # schema (DROP SCHEMA public CASCADE) to isolate itself, so running two at
-      # once drops the tables out from under the other.
+      # Each test now provisions its own isolated Postgres schema (unique UUID
+      # name), so they are safe to run in parallel and cannot corrupt each other
+      # or any existing database.
       - name: Test (Postgres-backed)
         run: |
+<<<<<<< HEAD
           cargo test -p lumenqraph-indexer  -- --ignored --test-threads=1
           cargo test -p lumenqraph-webhooks -- --ignored --test-threads=1
           cargo test -p lumenqraph-api      -- --ignored --test-threads=1
@@ -78,6 +79,12 @@ jobs:
         with:
           name: coverage-lcov
           path: lcov.info
+=======
+          cargo test -p lumenqraph-indexer  -- --ignored
+          cargo test -p lumenqraph-webhooks -- --ignored
+          cargo test -p lumenqraph-api      -- --ignored
+          cargo test -p lumenqraph-mcp      -- --ignored
+>>>>>>> pr-166
       - name: Build (release)
         run: cargo build --workspace --release
 

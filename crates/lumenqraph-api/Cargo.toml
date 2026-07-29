@@ -39,3 +39,4 @@ utoipa-redoc = { version = "4", features = ["axum"] }
 # Only for building contract-spec fixtures in the spec-cache tests; the API
 # itself never touches XDR directly.
 stellar-xdr.workspace = true
+tower.workspace = true

@@ -23,6 +23,7 @@ reqwest.workspace = true
 stellar-xdr.workspace = true
 hex.workspace = true
 sha2.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

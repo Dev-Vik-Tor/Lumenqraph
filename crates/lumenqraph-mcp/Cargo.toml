@@ -21,3 +21,4 @@ sqlx.workspace = true
 reqwest.workspace = true
 hex.workspace = true
 chrono.workspace = true
+uuid.workspace = true

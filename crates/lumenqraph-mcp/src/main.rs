@@ -243,4 +243,269 @@ mod tests {
         assert_eq!(err["error"]["code"], -32601);
         assert_eq!(err["id"], 3);
     }
+
+    // ── handshake shape ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_returns_none_for_notifications() {
+        // Notifications have no `id` — the server must not reply.
+        let msg = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        // Build a fake State — connect_lazy so no real DB is needed.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost/test")
+            .unwrap();
+        let state = State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        };
+        let resp = handle(&state, msg).await;
+        assert!(resp.is_none(), "notifications should not produce a response");
+    }
+
+    #[tokio::test]
+    async fn handle_returns_error_for_unknown_method() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost/test")
+            .unwrap();
+        let state = State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        };
+        let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "unknown/method" });
+        let resp = handle(&state, msg).await.unwrap();
+        assert_eq!(resp["error"]["code"], -32601);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("unknown/method"));
+    }
+
+    #[tokio::test]
+    async fn handle_ping_returns_empty_result() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost/test")
+            .unwrap();
+        let state = State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        };
+        let msg = json!({ "jsonrpc": "2.0", "id": 42, "method": "ping" });
+        let resp = handle(&state, msg).await.unwrap();
+        assert_eq!(resp["id"], 42);
+        assert!(resp["result"].is_object());
+    }
+
+    // ── tools/list shape ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tools_list_response_is_well_formed() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost/test")
+            .unwrap();
+        let state = State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        };
+        let msg = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let resp = handle(&state, msg).await.unwrap();
+        assert_eq!(resp["id"], 2);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8, "all eight tools must be declared");
+        for tool in tools {
+            // Every tool must have a non-empty name, description, and an object schema.
+            assert!(!tool["name"].as_str().unwrap_or("").is_empty());
+            assert!(!tool["description"].as_str().unwrap_or("").is_empty());
+            assert_eq!(
+                tool["inputSchema"]["type"],
+                "object",
+                "tool {:?} must declare an object inputSchema",
+                tool["name"]
+            );
+        }
+    }
+
+    // ── each tool's required-argument validation ──────────────────────────
+
+    /// Assert that calling a tool without its required arguments yields an
+    /// `isError: true` result (MCP convention) mentioning the missing field.
+    async fn assert_missing_arg_error(tool_name: &str, args: Value, expected_in_msg: &str) {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost/test")
+            .unwrap();
+        let state = State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool_name, "arguments": args }
+        });
+        let resp = handle(&state, msg).await.unwrap();
+        // The result is always present (MCP errors are results with isError).
+        let result = &resp["result"];
+        assert_eq!(
+            result["isError"], true,
+            "tool {tool_name:?} with missing arg should set isError"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains(expected_in_msg),
+            "tool {tool_name:?}: expected {expected_in_msg:?} in error text, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_contract_interface_requires_contract_id() {
+        assert_missing_arg_error("get_contract_interface", json!({}), "contract_id").await;
+    }
+
+    #[tokio::test]
+    async fn get_contract_upgrades_requires_contract_id() {
+        assert_missing_arg_error("get_contract_upgrades", json!({}), "contract_id").await;
+    }
+
+    #[tokio::test]
+    async fn get_contract_state_requires_contract_id() {
+        assert_missing_arg_error("get_contract_state", json!({}), "contract_id").await;
+    }
+
+    #[tokio::test]
+    async fn get_contract_data_requires_contract_id() {
+        assert_missing_arg_error("get_contract_data", json!({}), "contract_id").await;
+    }
+
+    #[tokio::test]
+    async fn query_events_requires_contract_id() {
+        assert_missing_arg_error("query_events", json!({}), "contract_id").await;
+    }
+
+    #[tokio::test]
+    async fn call_contract_requires_contract_id_and_function() {
+        assert_missing_arg_error("call_contract", json!({}), "contract_id").await;
+        assert_missing_arg_error(
+            "call_contract",
+            json!({ "contract_id": "C1" }),
+            "function",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn simulate_call_requires_contract_id_and_function() {
+        assert_missing_arg_error("simulate_call", json!({}), "contract_id").await;
+        assert_missing_arg_error(
+            "simulate_call",
+            json!({ "contract_id": "C1" }),
+            "function",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_name_returns_is_error() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost/test")
+            .unwrap();
+        let state = State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        };
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 5,
+            "method": "tools/call",
+            "params": { "name": "no_such_tool", "arguments": {} }
+        });
+        let resp = handle(&state, msg).await.unwrap();
+        assert_eq!(resp["result"]["isError"], true);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("no_such_tool"),
+            "error should mention the unknown tool name: {text}"
+        );
+    }
+
+    // ── DB-backed tools/call tests ─────────────────────────────────────────
+    //
+    // These call list_contracts, query_events, etc. against an isolated test
+    // schema. Marked #[ignore] and run via `make test-db`.
+
+    async fn fixture_state() -> State {
+        let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL");
+        let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        let option = format!("-c search_path={schema},public");
+        let sep = if url.contains('?') { "&" } else { "?" };
+        let schema_url = format!("{url}{sep}options={}", percent_encode(&option));
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&schema_url)
+            .await
+            .unwrap();
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        State {
+            pool,
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+        }
+    }
+
+    fn percent_encode(s: &str) -> String {
+        s.chars()
+            .flat_map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => vec![c],
+                c => format!("%{:02X}", c as u32).chars().collect(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn list_contracts_returns_empty_on_fresh_db() {
+        let state = fixture_state().await;
+        let result = tools::call(&state, "list_contracts", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["contracts"], json!([]), "fresh DB has no contracts");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn query_events_returns_empty_for_unknown_contract() {
+        let state = fixture_state().await;
+        let result = tools::call(
+            &state,
+            "query_events",
+            &json!({ "contract_id": "CNOPE", "limit": 5 }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["count"], 0);
+        assert_eq!(result["events"], json!([]));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs postgres"]
+    async fn get_contract_interface_errors_for_unindexed_contract() {
+        let state = fixture_state().await;
+        let err = tools::call(
+            &state,
+            "get_contract_interface",
+            &json!({ "contract_id": "CNOPE" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("CNOPE"),
+            "error should mention the contract id: {err}"
+        );
+    }
 }

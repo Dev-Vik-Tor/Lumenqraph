@@ -130,3 +130,321 @@ pub async fn simulate_call(
 fn encode_error_to_api(e: EncodeError) -> ApiError {
     ApiError::bad_request(e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Handler-level tests for `call_function` and `simulate_call`.
+    //!
+    //! These run without a real Postgres or RPC server. The `SpecCache` is
+    //! seeded directly; the `RpcClient` is pointed at a URL that will never be
+    //! contacted because the tests control what happens before the network call.
+    //!
+    //! How it works:
+    //! - We build a minimal `AppState` with a lazy (never-connecting) pool and
+    //!   a `SpecCache` pre-populated with a synthetic spec.
+    //! - For "unknown function / bad arg" cases the error is raised *before*
+    //!   any RPC call, so no network mock is needed.
+    //! - For "happy path / simulation-error" cases we use a real RpcClient
+    //!   pointed at a dummy URL and a mocked `simulate` via a lightweight
+    //!   in-process HTTP server (or, for simplicity, an inline axum oneshot).
+
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+    use serde_json::{json, Value};
+    use stellar_xdr::curr::{
+        Limits, ScSpecEntry, ScSpecFunctionV0, ScSpecInputsEntry, ScSpecTypeDef, ScSymbol, WriteXdr,
+    };
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::rate_limit::RateLimiter;
+    use crate::rpc::RpcClient;
+    use crate::specs::{CachedSpec, SpecCache};
+
+    // ── helpers ────────────────────────────────────────────────────────────
+
+    /// Build a raw spec section containing one function:
+    ///   `fn <name>(account: Address) -> i128`
+    fn single_fn_spec(name: &str) -> Vec<u8> {
+        use stellar_xdr::curr::{ScSpecFunctionInputV0, StringM};
+        let entry = ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+            doc: "".try_into().unwrap(),
+            name: ScSymbol(name.try_into().unwrap()),
+            inputs: vec![ScSpecFunctionInputV0 {
+                doc: "".try_into().unwrap(),
+                name: StringM::try_from("account").unwrap(),
+                type_: ScSpecTypeDef::Address,
+            }]
+            .try_into()
+            .unwrap(),
+            outputs: vec![ScSpecTypeDef::I128].try_into().unwrap(),
+        });
+        entry.to_xdr(Limits::none()).unwrap()
+    }
+
+    /// Build a spec section with a zero-argument function: `fn balance() -> u32`
+    fn zero_arg_spec(name: &str) -> Vec<u8> {
+        let entry = ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+            doc: "".try_into().unwrap(),
+            name: ScSymbol(name.try_into().unwrap()),
+            inputs: vec![].try_into().unwrap(),
+            outputs: vec![ScSpecTypeDef::U32].try_into().unwrap(),
+        });
+        entry.to_xdr(Limits::none()).unwrap()
+    }
+
+    /// Construct an `AppState` with a seeded cache and a lazy (never-used) pool.
+    fn make_state(contract_id: &str, spec_section: Vec<u8>) -> AppState {
+        // connect_lazy never opens a connection until the first query — safe
+        // for tests that never reach the pool.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost:5432/test")
+            .unwrap();
+
+        let cache = SpecCache::new();
+        cache.seed(
+            contract_id,
+            CachedSpec {
+                parsed: lumenqraph_core::ContractSpec::from_spec_xdr(&spec_section),
+                section: spec_section,
+            },
+        );
+
+        AppState {
+            pool,
+            require_auth: false,
+            anon_rate_limit: 1_000_000,
+            limiter: Arc::new(RateLimiter::new()),
+            http_requests: Arc::new(AtomicU64::new(0)),
+            // Dummy RPC — never contacted in error-path tests.
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+            specs: Arc::new(cache),
+            mounts: Arc::new(vec![]),
+            rpc_limiter: Arc::new(RateLimiter::new()),
+            rpc_require_auth: false,
+            rpc_anon_rate_limit: 1_000_000,
+        }
+    }
+
+    /// POST JSON to the given Axum router path and return (status, body).
+    async fn call(app: Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    fn app_for(state: AppState) -> Router {
+        Router::new()
+            .route(
+                "/contracts/:id/call",
+                post(call_function),
+            )
+            .route(
+                "/contracts/:id/simulate",
+                post(simulate_call),
+            )
+            .route(
+                "/contracts/:id/functions",
+                axum::routing::get(list_functions),
+            )
+            .with_state(state)
+    }
+
+    // ── list_functions ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_functions_returns_typed_signature() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let state = make_state(contract, single_fn_spec("balance"));
+        let app = app_for(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/contracts/{contract}/functions"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let fns = body["functions"].as_array().unwrap();
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0]["name"], "balance");
+        assert_eq!(fns[0]["inputs"][0]["name"], "account");
+        assert_eq!(fns[0]["inputs"][0]["type"], "Address");
+        assert_eq!(fns[0]["outputs"][0], "i128");
+    }
+
+    // ── unknown function → 400 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_function_returns_400() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let state = make_state(contract, single_fn_spec("balance"));
+        let app = app_for(state);
+
+        let (status, body) = call(
+            app,
+            &format!("/contracts/{contract}/call"),
+            json!({ "function": "nonexistent", "args": {} }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = body["error"].as_str().unwrap();
+        assert!(
+            msg.contains("nonexistent"),
+            "error should mention the unknown function name: {msg}"
+        );
+    }
+
+    // ── missing argument → 400 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn missing_argument_returns_400() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let state = make_state(contract, single_fn_spec("balance"));
+        let app = app_for(state);
+
+        let (status, body) = call(
+            app,
+            &format!("/contracts/{contract}/call"),
+            // `balance` requires `account`, but we pass an empty object.
+            json!({ "function": "balance", "args": {} }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = body["error"].as_str().unwrap();
+        assert!(
+            msg.contains("account"),
+            "error should name the missing argument: {msg}"
+        );
+    }
+
+    // ── wrong-typed argument → 400 ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn wrong_typed_argument_returns_400() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let state = make_state(contract, single_fn_spec("balance"));
+        let app = app_for(state);
+
+        let (status, body) = call(
+            app,
+            &format!("/contracts/{contract}/call"),
+            // `account` expects an Address strkey, not a number.
+            json!({ "function": "balance", "args": { "account": 12345 } }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = body["error"].as_str().unwrap();
+        assert!(
+            msg.contains("account"),
+            "error should name the bad argument: {msg}"
+        );
+    }
+
+    // ── invalid address strkey → 400 ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn invalid_address_strkey_returns_400_with_descriptive_message() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let state = make_state(contract, single_fn_spec("balance"));
+        let app = app_for(state);
+
+        let (status, body) = call(
+            app,
+            &format!("/contracts/{contract}/call"),
+            json!({ "function": "balance", "args": { "account": "not-a-valid-strkey" } }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = body["error"].as_str().unwrap();
+        // The documented client-facing message shape from the README.
+        assert!(
+            msg.contains("account") && msg.contains("address"),
+            "expected 'argument \"account\": invalid address strkey' style message, got: {msg}"
+        );
+    }
+
+    // ── SAC / no-spec contract → 404 ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn contract_not_in_cache_returns_404() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        // Build state with an empty cache (no spec seeded for `contract`).
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@localhost:5432/test")
+            .unwrap();
+        let state = AppState {
+            pool,
+            require_auth: false,
+            anon_rate_limit: 1_000_000,
+            limiter: Arc::new(RateLimiter::new()),
+            http_requests: Arc::new(AtomicU64::new(0)),
+            rpc: RpcClient::new("http://127.0.0.1:0"),
+            specs: Arc::new(SpecCache::new()), // empty — will 404
+            mounts: Arc::new(vec![]),
+            rpc_limiter: Arc::new(RateLimiter::new()),
+            rpc_require_auth: false,
+            rpc_anon_rate_limit: 1_000_000,
+        };
+        let app = app_for(state);
+
+        let (status, _body) = call(
+            app,
+            &format!("/contracts/{contract}/call"),
+            json!({ "function": "balance", "args": {} }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── extra argument in positional array ────────────────────────────────
+    // The encoder picks args positionally; passing too many is not an error
+    // (extra elements are silently ignored), but passing a wrong type for
+    // the argument that *is* consumed must still be caught.
+
+    #[tokio::test]
+    async fn positional_args_wrong_type_returns_400() {
+        let contract = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+        let state = make_state(contract, single_fn_spec("balance"));
+        let app = app_for(state);
+
+        let (status, body) = call(
+            app,
+            &format!("/contracts/{contract}/call"),
+            // Positional array — arg[0] is `account: Address`, pass a number.
+            json!({ "function": "balance", "args": [42] }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = body["error"].as_str().unwrap();
+        assert!(
+            msg.contains("account"),
+            "error should name the bad argument: {msg}"
+        );
+    }
+}

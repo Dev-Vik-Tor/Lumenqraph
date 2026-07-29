@@ -132,27 +132,46 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use sqlx::Row;
 
-    /// Fresh schema per test, so tests don't see each other's rows.
+    /// Fresh, isolated schema per test — safe for parallel execution.
     async fn fixture() -> PgPool {
         let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
+        let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
             .connect(&url)
             .await
-            .expect("connect");
+            .expect("connect to TEST_DATABASE_URL");
+        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            .execute(&admin)
+            .await
+            .expect("create test schema");
+        admin.close().await;
+
+        let option = format!("-c search_path={schema},public");
+        let sep = if url.contains('?') { "&" } else { "?" };
+        let schema_url = format!("{url}{sep}options={}", percent_encode(&option));
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&schema_url)
+            .await
+            .expect("connect with search_path");
         // Separate statements: sqlx prepares, and a prepared statement can only
         // carry one command.
-        for stmt in ["DROP SCHEMA public CASCADE", "CREATE SCHEMA public"] {
-            sqlx::query(stmt)
-                .execute(&pool)
-                .await
-                .expect("reset schema");
-        }
         sqlx::migrate!("../../migrations")
             .run(&pool)
             .await
             .expect("migrate");
         pool
+    }
+
+    fn percent_encode(s: &str) -> String {
+        s.chars()
+            .flat_map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => vec![c],
+                c => format!("%{:02X}", c as u32).chars().collect(),
+            })
+            .collect()
     }
 
     async fn insert_event(pool: &PgPool, id: &str, ledger: i64) {
