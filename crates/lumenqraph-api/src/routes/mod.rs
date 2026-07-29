@@ -19,6 +19,7 @@ use async_graphql::http::GraphiQLSource;
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::extract::Request;
 use axum::http::{header, HeaderValue};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{any, delete, get, patch, post};
 use axum::{middleware, Extension, Router};
@@ -127,7 +128,15 @@ pub fn router(state: AppState) -> Router {
             auth_and_rate_limit,
         ));
 
-    let mut app = public.merge(protected).merge(rpc_routes).with_state(state.clone());
+    let metrics_collector = state.metrics.clone();
+    let mut app = public
+        .merge(protected)
+        .merge(rpc_routes)
+        .with_state(state.clone())
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            let collector = metrics_collector.clone();
+            collector.middleware(req, next)
+        }));
 
     // Sibling instances under a path prefix (see `proxy`). Registered outside
     // the auth middleware: each upstream enforces its own policy.

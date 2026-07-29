@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::metrics_middleware::MetricsCollector;
 use crate::rate_limit::RateLimiter;
 use crate::rpc::RpcClient;
 use crate::specs::SpecCache;
@@ -35,4 +36,6 @@ pub struct AppState {
     pub rpc_require_auth: bool,
     /// Requests/min allowed for unauthenticated callers on RPC routes.
     pub rpc_anon_rate_limit: i32,
+    /// Per-route request metrics.
+    pub metrics: Arc<MetricsCollector>,
 }

@@ -4,6 +4,7 @@
 
 mod config;
 mod dispatcher;
+mod metrics;
 
 use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;
@@ -32,6 +33,12 @@ async fn main() -> anyhow::Result<()> {
         .connect_timeout(config.connect_timeout())
         .timeout(config.total_timeout())
         .build()?;
+
+    let metrics_bind_addr = std::env::var("WEBHOOKS_METRICS_BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:9091".to_string());
+
+    let pool_arc = std::sync::Arc::new(pool.clone());
+    metrics::start_metrics_server(pool_arc, &metrics_bind_addr).await?;
 
     info!(tick_secs = config.tick_secs, "starting lumenqraph webhooks");
     let interval = Duration::from_secs(config.tick_secs.max(1));
