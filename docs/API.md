@@ -69,14 +69,56 @@ Materialized SEP-41 transfers. Query: `limit`, `offset`, `from`, `to`.
    "ledger": 3550885, "event_id": "..." }]
 ```
 
+### `GET /contracts/:id/interface`
+The decoded on-chain interface: `functions`, `events`, `structs`, `unions`,
+`enums`. Query: `version` (a historical version; default is the current one).
+```json
+{ "contract_id": "CB...", "has_events": true,
+  "interface": { "functions": [...], "events": [...], "structs": [], "unions": [], "enums": [] },
+  "fetched_at": "2026-07-15T..." }
+```
+
+### `GET /contracts/:id/interface/history`
+Every interface version observed, newest first. Query: `limit` (1–200, default 50).
+Requires the indexer's `UPGRADE_WATCH`.
+```json
+{ "contract_id": "CB...", "count": 2, "versions": [
+  { "version": 2, "wasm_hash": "...", "previous_wasm_hash": "...",
+    "breaking": true, "observed_at": "2026-07-15T...Z",
+    "diff": { "breaking": true, "summary": ["removed function withdraw() -> void"],
+              "functions": { "added": [], "removed": ["withdraw() -> void"], "changed": [] },
+              "events": { "added": [], "removed": [], "changed": [] },
+              "types":  { "added": [], "removed": [], "changed": [] } } },
+  { "version": 1, "previous_wasm_hash": null, "breaking": false, "diff": null }
+] }
+```
+
+### `GET /contracts/:id/interface/diff`
+Diff any two versions. Query: `from`, `to` (default: the latest upgrade, i.e.
+`to` = newest, `from` = the one before). `400` if the contract has only a
+baseline version, or if `from` == `to`; `404` for an unknown version.
+```json
+{ "contract_id": "CB...", "from": 1, "to": 2,
+  "diff": { "breaking": true,
+    "summary": ["removed function withdraw(amount: i128) -> void"],
+    "functions": { "added": [], "removed": ["withdraw(amount: i128) -> void"], "changed": [] },
+    "events": { "added": [], "removed": [], "changed": [] },
+    "types": { "added": [], "removed": [], "changed": [] } } }
+```
+
+`breaking` is true when anything was removed or changed — an integration built
+against the old interface may no longer work. Additions alone are not breaking.
+
 ### `GET /contracts/:id/state`
 Versioned snapshots of the contract's **instance storage** (admin, config,
 counters…), newest first. Query: `limit` (1–200, default 1 = current state).
 Requires the indexer's `STATE_INDEXING`; `404` if there are no snapshots.
 ```json
 { "contract_id": "CB...", "count": 1, "versions": [
-  { "ledger": 3550880, "storage": { "TotalSupply": "1000", "IsPaused": false },
-    "captured_at": "2026-07-15T..." }] }
+  { "ledger": 3550880, "storage": [
+      { "key": "METADATA", "val": { "name": "Token", "symbol": "TKN" } },
+      { "key": ["TotalSupply"], "val": "1000" }
+    ], "captured_at": "2026-07-15T..." }] }
 ```
 
 ### `GET /contracts/:id/data`
@@ -93,7 +135,16 @@ Requires the indexer's `KEY_INDEXING`.
 
 ### `GET /contracts/:id/data/:key_hash`
 The version history of a single per-key entry (one holder's balance over time),
-newest first. Query: `limit` (1–500).
+newest first. Query: `limit` (1–500, default 1).
+```json
+{ "contract_id": "CB...", "key_hash": "9f2c…",
+  "key": ["Balance", "G..."], "durability": "persistent", "label": "balance",
+  "count": 3, "versions": [
+    { "ledger": 3550881, "value": "500", "captured_at": "2026-07-15T..." },
+    { "ledger": 3550870, "value": "450", "captured_at": "2026-07-15T..." },
+    { "ledger": 3550850, "value": "400", "captured_at": "2026-07-15T..." }
+  ] }
+```
 
 ## Read layer (authenticated)
 
@@ -233,6 +284,10 @@ version, same output.
 
 **Success response:** The generated TypeScript client source code (content-type:
 `text/plain`). The client is self-contained and zero-dependency.
+
+Requires the contract's interface to be indexed (the first time the indexer saw
+an event from that contract, or when `STATE_INDEXING` is enabled). Stellar Asset
+Contracts (no WASM spec) cannot be generated from.
 
 ## Webhooks (authenticated)
 

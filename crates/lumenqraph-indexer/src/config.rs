@@ -1,6 +1,7 @@
 //! Indexer configuration, loaded from environment (see `.env.example`).
 
 use anyhow::Context;
+use crate::keys::{KeyTemplate, parse_durability};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -39,6 +40,11 @@ pub struct Config {
     /// Durability of the balance storage entry: "persistent" (default) or
     /// "temporary".
     pub balance_key_durability: String,
+    /// Configurable key templates for per-key state indexing (JSON array).
+    /// Format: [{"symbol":"Balance","events":["transfer","mint"],"params":[1,2],"durability":"persistent","label":"balance"}]
+    /// Each template defines: symbol (storage key variant), events (triggering event names),
+    /// params (topic indices to extract), durability (persistent/temporary), label (optional grouping tag).
+    pub key_templates: Vec<KeyTemplate>,
     /// Keep only the last N ledgers of history, pruning older rows as the tip
     /// advances. 0 (default) => keep everything. Set this when the database has
     /// a hard size cap (e.g. a 500MB free tier) that an unbounded index would
