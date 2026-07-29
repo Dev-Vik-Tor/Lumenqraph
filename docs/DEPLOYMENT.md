@@ -21,80 +21,134 @@ assets (the Docker image ships them at `/app/explorer`).
 ```bash
 docker compose -f docker-compose.full.yml up --build -d
 ```
-One image holds all three binaries; each service overrides `command:`.
+One image holds all three binaries; each service overrides `command:`.## Managed Deploy (Fly.io)
 
-## Managed deploy (Fly.io)
+Fly.io is the recommended hosting platform for running Lumenqraph in production. The repository ships with a pre-configured [`fly.toml`](../fly.toml) that defines three distinct process groups:
+1. `api`: Exposes the public REST/GraphQL API and serves the static explorer UI.
+2. `indexer`: The worker that tails Soroban RPC and writes to Postgres.
+3. `webhooks`: The worker that dispatches HTTP callback POSTs to subscribers.
 
-The repo ships a ready [`fly.toml`](../fly.toml): one image, three process
-groups (`api` serves HTTP + explorer; `indexer` and `webhooks` are always-on
-workers), health-checked on `/health`.
+### Step-by-Step Fly.io Walkthrough
 
+#### 1. Initialize Fly App
+Run the following command to initialize the application configuration. Fly.io will prompt you to choose an app name and default region:
 ```bash
-fly launch --no-deploy --copy-config       # reuse fly.toml; pick your app name
-fly secrets set DATABASE_URL='postgres://…?sslmode=require'
-fly secrets set CONTRACT_IDS='CAS3J7GY…,CDZZWCAJ…'   # optional; empty = index all
-fly deploy
-curl https://<app>.fly.dev/health          # {"status":"ok","lag_ledgers":0,…}
-open  https://<app>.fly.dev/                # explorer UI
+fly launch --no-deploy --copy-config
+```
+Do not deploy immediately (`--no-deploy`) as you need to configure secrets and databases first.
+
+#### 2. Set Up Managed Postgres
+Provision a managed Postgres instance (e.g., via Neon, Supabase, or Fly Postgres). Ensure TLS is required and copy the connection string.
+> [!IMPORTANT]
+> The indexer must apply schema migrations on startup before the API and webhooks start. When using Fly.io, the `indexer` process group automatically runs migrations using built-in `sqlx::migrate!` on boot. 
+> If you are deploying only the `api` or `webhooks` without the `indexer`, you must run database setup manually beforehand using `scripts/setup_db.sh`.
+
+#### 3. Configure Secrets
+Set the mandatory secret environment variables:
+```bash
+# Point to your managed Postgres (append ?sslmode=require)
+fly secrets set DATABASE_URL="postgres://user:password@host:port/dbname?sslmode=require"
+
+# (Optional) Comma-separated allowlist of contracts to index (empty = index all)
+fly secrets set CONTRACT_IDS="CAS3J7GY...,CDZZWCAJ..."
+
+# (Optional) Set an API key if REQUIRE_API_KEY=true is configured
+fly secrets set API_KEY="your-secure-api-key"
 ```
 
-Scale groups independently, e.g. `fly scale vm shared-cpu-2x --process-group indexer`.
-Fly requires a card on file; machines on a trial org are force-stopped after
-5 minutes, which the indexer cannot tolerate. For a card-free deploy, see below.
+#### 4. Configure Non-Secret Env Vars in `fly.toml`
+Verify and adjust the variables in the `[env]` section of your `fly.toml`:
+- `RPC_URL`: Set to a reliable Soroban RPC provider (e.g., `"https://mainnet.sorobanrpc.com"`).
+- `MAX_CATCHUP_LEDGERS`: Set to `"120"` for public RPC rates, or higher for paid RPCs.
 
-## Free-tier deploy (Render + Supabase)
+#### 5. Scaling and Availability Configuration
+The indexer and webhooks workers must run as single instances to prevent database write conflicts and duplicate webhook dispatches. The API can scale horizontally.
+In `fly.toml`, ensure the following under `[http_service]`:
+```toml
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+processes = ["api"]
+```
+To scale the API horizontally:
+```bash
+fly scale count api=2
+```
+Keep the indexer and webhooks at a single instance:
+```bash
+fly scale count indexer=1 webhooks=1
+```
+To adjust resources for individual processes:
+```bash
+fly scale vm shared-cpu-1x --memory 1024 --process-group indexer
+fly scale vm shared-cpu-1x --memory 512 --process-group api
+```
 
-For a standing demo at zero cost and no credit card. The repo ships a ready
-[`render.yaml`](../render.yaml). Push to GitHub, then **Render Dashboard → New →
-Blueprint →** pick the repo; you'll be prompted for `DATABASE_URL` and
-`CONTRACT_IDS`.
+#### 6. Deploy
+Deploy the configuration:
+```bash
+fly deploy
+```
+Once deployed, check health and access the explorer UI:
+```bash
+curl https://<your-app>.fly.dev/health
+open https://<your-app>.fly.dev/
+```
 
-Get `DATABASE_URL` from **Supabase → Project Settings → Database → Connection
-string** (append `?sslmode=require`). Free Supabase pauses a project only after
-7 days of *inactivity*, which a running indexer prevents.
+---
 
-This tier constrains the architecture in three ways, all handled by the
-blueprint but worth understanding:
+## Free-Tier Deploy (Render + Supabase)
 
-- **One service, not three.** Render's free plan has no background-worker type,
-  and 750 instance-hours/month covers exactly one always-on service (a month is
-  ~730h). So `dockerCommand: run-all-in-one.sh` runs the indexer *inside* the web
-  service. Webhooks are dropped — add them on a paid plan or a second host.
-- **A keep-alive ping is mandatory.** Free web services spin down after 15
-  minutes without inbound traffic, which stops the indexer with them. Point a
-  free external cron (e.g. cron-job.org) at `https://<app>.onrender.com/health`
-  every 10 minutes. Without it the index silently stops at the first idle gap.
-- **Data volume must be bounded.** Supabase free caps at 500MB, and writes start
-  failing at the cap. Two settings keep the footprint flat:
-  - `CONTRACT_IDS` **must** be an allowlist, and **must not** include
-    `CAS3J7GY…` — that SAC emits ~550 events/ledger (~9.5M/day) and would fill
-    500MB within hours.
-  - `RETENTION_LEDGERS=34560` (~2 days) prunes older history as the tip advances.
-    Watch actual disk use in Supabase before raising it; 120960 (~7 days) is the
-    ceiling worth having, since public RPC can't backfill further back anyway.
+For a zero-cost demonstration and quick evaluation, you can host Lumenqraph on Render's free tier paired with a free Supabase Postgres instance. 
 
-Expect gaps after any restart: `MAX_CATCHUP_LEDGERS=120` makes the indexer skip
-and log a gap rather than stall, because public RPC rejects a `getEvents` more
-than a few thousand ledgers behind the tip. That's the honest trade for a free
-demo — a continuous index needs an always-on worker and a retaining RPC.
+### Free Tier Architecture Tradeoffs
+Render's free tier has several limits that shape how we deploy:
+- **Single Process Limit**: Render's free tier does not support background workers. The free account monthly allowance of 750 instance-hours covers exactly one running service (~730 hours/month).
+- **All-in-One Container**: We bypass the single-service limit by using [`scripts/run-all-in-one.sh`](../scripts/run-all-in-one.sh). This script spins up the `indexer` and `api` together in the same container. Webhooks are omitted to conserve resources.
+- **Auto Spin-Down**: Free Render web services are spun down after 15 minutes of inbound HTTP inactivity. This stops the indexer completely.
+- **Database Storage Limits**: Supabase free Postgres caps database size at 500MB. Unrestricted indexing fills this up in hours.
 
-### Serving testnet from the same container
+### Step-by-Step Render Walkthrough
 
-A deployment indexes exactly one network, but the free container can host two:
-set `TESTNET_DATABASE_URL` (plus `TESTNET_CONTRACT_IDS`) and
-`run-all-in-one.sh` starts a second indexer+API pair against Soroban testnet on
-an internal port, which the public API reverse-proxies under `/testnet`
-(`INSTANCE_MOUNTS`). One origin, both networks; the explorer's network selector
-discovers the mount via `/health` and switches with one click.
+#### 1. Provision Supabase Database
+1. Create a free account at [Supabase](https://supabase.com).
+2. Create a new project.
+3. Go to **Project Settings → Database → Connection string** and copy the URI. Remember to append `?sslmode=require`.
 
-For the second database, reuse the same Supabase project — run
-`CREATE DATABASE lumenqraph_testnet;` in its SQL editor, then use the same
-pooler connection string with the database name swapped. Both databases share
-the project's 500MB, so keep the testnet allowlist curated and
-`TESTNET_RETENTION_LEDGERS` short (the default in `render.yaml` is ~1 day —
-testnet is a scratch network, nobody needs deep history there).
+#### 2. Deploy Blueprint on Render
+1. Fork the Lumenqraph repository on GitHub.
+2. Go to your [Render Dashboard](https://dashboard.render.com).
+3. Click **New → Blueprint**.
+4. Select your fork of the Lumenqraph repository.
+5. Render will automatically parse [`render.yaml`](../render.yaml). You will be prompted to input:
+   - `DATABASE_URL`: The Supabase connection string.
+   - `CONTRACT_IDS`: **Must** be a focused allowlist of contracts. **Do not** leave this empty or include high-frequency contracts (like the Stellar Asset Contract `CAS3J7GY...` which generates millions of events daily and will fill the 500MB cap in hours).
 
-## Production checklist
+#### 3. Prevent Inactivity Spin-Down (Keep-Alive Cron)
+Since Render will sleep the container if no HTTP requests are received, you must ping the health check endpoint.
+1. Create a free account at an external cron provider (e.g., [cron-job.org](https://cron-job.org)).
+2. Configure a cron job targeting `https://<your-render-subdomain>.onrender.com/health`.
+3. Set the schedule to run **every 10 minutes**. This keeps the container awake and indexing continuously.
+
+#### 4. Configure Testnet & Mainnet Dual-Indexing
+You can index both Stellar Mainnet and Testnet using a single Render container:
+1. In your Supabase SQL Editor, create a second database:
+   ```sql
+   CREATE DATABASE lumenqraph_testnet;
+   ```
+2. In Render environment settings, configure:
+   - `TESTNET_DATABASE_URL`: The same connection string as before, but with the database name swapped to `lumenqraph_testnet`.
+   - `TESTNET_CONTRACT_IDS`: A focused contract allowlist for testnet.
+3. `scripts/run-all-in-one.sh` detects `TESTNET_DATABASE_URL` and starts a testnet API/indexer pair internally, proxying it via `INSTANCE_MOUNTS` under `/testnet`. The explorer UI will automatically detect the sibling network mount via `/health` and display a network switcher.
+
+#### 5. Moving to a Paid Production Plan
+When ready to move to separate, robust services:
+1. Delete or disable the Render Blueprint setup on the free plan.
+2. Provision a Render Web Service for the API, a Background Worker for the Indexer, and a Background Worker for Webhooks.
+3. Remove the `run-all-in-one.sh` override and configure individual container start commands (`lumenqraph-api`, `lumenqraph-indexer`, `lumenqraph-webhooks`).
+4. Upgrade to a paid Supabase plan or custom managed Postgres to lift the 500MB limit.
+
+## Production Checklist
 
 - [ ] `DATABASE_URL` → managed Postgres with TLS (`sslmode=require`).
 - [ ] `RPC_URL` set (paid/retaining RPC if you need backfill or higher limits).
@@ -108,7 +162,7 @@ testnet is a scratch network, nobody needs deep history there).
       > 3600s for critical) and error rates. See the **Observability** section above
       for recommended thresholds and key metrics.
 
-## Connection pool sizing
+## Connection Pool Sizing
 
 Each service opens its own pool. Four env vars control every pool (the defaults
 below are per-service):

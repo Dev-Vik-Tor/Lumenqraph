@@ -1,5 +1,7 @@
 # Contributing
 
+Before contributing, please review the [Troubleshooting & FAQ guide](docs/TROUBLESHOOTING.md) for details on common operational issues and setup challenges.
+
 ## Security
 
 Please report security vulnerabilities responsibly by following our [Security Policy](SECURITY.md). Do not open public issues for security-related concerns.
