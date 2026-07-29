@@ -20,7 +20,7 @@ use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::extract::Request;
 use axum::http::{header, HeaderValue};
 use axum::response::{Html, IntoResponse};
-use axum::routing::{any, delete, get, post};
+use axum::routing::{any, delete, get, patch, post};
 use axum::{middleware, Extension, Router};
 use tower::Layer;
 use tower_http::services::ServeDir;
@@ -56,6 +56,8 @@ pub fn router(state: AppState) -> Router {
     // Public, unauthenticated observability and documentation endpoints.
     let public = Router::new()
         .route("/health", get(health::health))
+        .route("/livez", get(health::livez))
+        .route("/readyz", get(health::readyz))
         .route("/metrics", get(metrics::metrics))
         .merge(openapi::router());
 
@@ -114,7 +116,8 @@ pub fn router(state: AppState) -> Router {
             "/webhooks",
             post(webhooks::create_webhook).get(webhooks::list_webhooks),
         )
-        .route("/webhooks/:id", delete(webhooks::delete_webhook))
+        .route("/webhooks/:id", delete(webhooks::delete_webhook).patch(webhooks::update_webhook))
+        .route("/webhooks/:id/deliveries", get(webhooks::list_webhook_deliveries))
         // GraphQL: POST executes queries, GET serves the GraphiQL IDE. Behind
         // the same auth + rate-limit middleware as the REST data routes.
         .route("/graphql", post(graphql_handler).get(graphiql))

@@ -1,6 +1,7 @@
-//! `GET /health` — indexing freshness and lag vs the chain tip.
+//! Health endpoints: `/health` for status, `/livez` for liveness, `/readyz` for readiness.
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
 
@@ -58,6 +59,52 @@ pub async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     })))
 }
 
+/// Liveness probe: returns 200 if the process is running.
+/// No database access required; used by orchestrators to detect dead processes.
+pub async fn livez() -> StatusCode {
+    StatusCode::OK
+}
+
+/// Readiness probe: returns 200 only when the indexer is caught up and healthy.
+/// Returns 503 if the database is unreachable or lag is too high.
+/// Used by orchestrators to route traffic only to ready instances.
+pub async fn readyz(State(state): State<AppState>) -> (StatusCode, Option<Json<Value>>) {
+    let status: Option<(i64, i64, i64, chrono::DateTime<chrono::Utc>)> = match sqlx::query_as(
+        "SELECT last_processed_ledger, chain_tip_ledger, errors_total, updated_at
+         FROM indexer_cursor WHERE id = 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(row)) => Some(row),
+        Ok(None) => {
+            // Cursor not yet created; not ready
+            return (StatusCode::SERVICE_UNAVAILABLE, None);
+        }
+        Err(_) => {
+            // Database error; not ready
+            return (StatusCode::SERVICE_UNAVAILABLE, None);
+        }
+    };
+
+    if let Some((last, tip, errors, updated_at)) = status {
+        let lag_ledgers = (tip - last).max(0);
+        let secs_since_update = (chrono::Utc::now() - updated_at).num_seconds();
+
+        // Ready if recent activity and not too far behind
+        let lag_threshold = env_parse("READYZ_LAG_THRESHOLD", 100i64);
+        let max_age_secs = env_parse("READYZ_MAX_AGE_SECS", 120i64);
+
+        if secs_since_update <= max_age_secs && lag_ledgers < lag_threshold {
+            (StatusCode::OK, None)
+        } else {
+            (StatusCode::SERVICE_UNAVAILABLE, None)
+        }
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, None)
+    }
+}
+
 /// Short name for the well-known Stellar network passphrases.
 fn network_name(passphrase: &str) -> &'static str {
     match passphrase {
@@ -66,4 +113,11 @@ fn network_name(passphrase: &str) -> &'static str {
         "Test SDF Future Network ; October 2022" => "futurenet",
         _ => "custom",
     }
+}
+
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }

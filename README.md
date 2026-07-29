@@ -174,11 +174,14 @@ Base URL defaults to `http://localhost:8080`. Full reference: [docs/API.md](docs
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | Indexing status and chain-tip lag. *(public)* |
+| `GET` | `/livez` | Liveness probe: returns 200 if process is running. No database access. *(public)* |
+| `GET` | `/readyz` | Readiness probe: returns 200 only when indexer is caught up and healthy; 503 otherwise. *(public)* |
 | `GET` | `/metrics` | Prometheus metrics. *(public)* |
 | `GET` | `/contracts` | Contracts seen, with per-contract counts. |
 | `GET` | `/contracts/:id/interface` | The contract's decoded on-chain interface: functions, events, and user-defined types. Query: `version` (a historical version; default current). |
 | `GET` | `/contracts/:id/interface/history` | Every interface version observed, newest first, each with its diff and `breaking` flag. Query: `limit`. |
 | `GET` | `/contracts/:id/interface/diff` | What changed between two interface versions. Query: `from`, `to` (default: the latest upgrade). |
+| `GET` | `/contracts/:id/sdk` | Generate a typed SDK client from the contract's on-chain spec. Query: `lang` (default `ts`), `version` (historical version). Returns a ready-to-use TypeScript client. |
 | `GET` | `/contracts/:id/state` | Versioned snapshots of the contract's instance storage, newest first. Query: `limit` (1 = current state). |
 | `GET` | `/contracts/:id/data` | Latest value of every per-key entry (e.g. holder balances). Query: `label`, `limit`. |
 | `GET` | `/contracts/:id/data/:key_hash` | Version history of a single per-key entry. Query: `limit`. |
@@ -439,6 +442,29 @@ query Recent($id: String!, $after: String) {
 ```
 
 Pass a page's `pageInfo.endCursor` back as `after` to fetch the next page. It sits behind the same auth + rate-limiting as the REST data routes.
+
+## Typed SDK generation
+
+Every contract's on-chain interface is a complete, runtime-verified spec. Lumenqraph uses this to **generate production-ready typed clients on demand**, without requiring manual ABI uploads or hand-written type stubs — a strong differentiator since the spec is shipped *with the code*.
+
+```bash
+# Generate a TypeScript client for any contract, save it, and import it
+curl -o MyContract.ts "https://lumenqraph.onrender.com/contracts/CB.../sdk?lang=ts"
+```
+
+The generated client is fully typed: functions, arguments, return types, and events all match the on-chain spec. Call it against the indexer's `/call` and `/simulate` endpoints:
+
+```ts
+import { ContractClient } from "./MyContract";
+const c = new ContractClient({ baseUrl: "https://lumenqraph.onrender.com" });
+const balance = await c.balance({ id: "G..." }); // typed, type-checked
+```
+
+**SDK endpoint**: `GET /contracts/:id/sdk`. Query parameters:
+- `lang` — target language (`ts` / TypeScript, default; others return `400`)
+- `version` — generate from a historical interface version (default: current)
+
+**Limitations**: Stellar Asset Contracts lack WASM specs and cannot be code-generated; attempt to generate from them returns `404`.
 
 ## TypeScript SDK
 

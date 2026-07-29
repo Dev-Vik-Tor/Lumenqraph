@@ -25,6 +25,16 @@ pub struct CreateWebhook {
     event_name: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateWebhook {
+    /// Toggle active/paused state of the subscription
+    active: Option<bool>,
+    /// Update contract filter
+    contract_id: Option<String>,
+    /// Update event name filter
+    event_name: Option<String>,
+}
+
 fn default_kind() -> String {
     "event".to_string()
 }
@@ -113,6 +123,74 @@ pub async fn list_webhooks(State(state): State<AppState>) -> ApiResult<Json<Vec<
     Ok(Json(out))
 }
 
+pub async fn update_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateWebhook>,
+) -> ApiResult<Json<Value>> {
+    // Check that at least one field is being updated
+    if body.active.is_none() && body.contract_id.is_none() && body.event_name.is_none() {
+        return Err(ApiError::bad_request("no fields to update"));
+    }
+
+    // Validate filters if updating them
+    if let Some(ref contract_id) = body.contract_id {
+        if contract_id.is_empty() {
+            return Err(ApiError::bad_request("contract_id cannot be empty"));
+        }
+    }
+
+    // Get current subscription
+    let current: (String, bool, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT kind, active, contract_id, event_name FROM webhook_subscriptions WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("subscription not found"))?;
+
+    let (kind, current_active, current_contract_id, current_event_name) = current;
+
+    // Use current values as defaults if not provided in update
+    let active = body.active.unwrap_or(current_active);
+    let contract_id = body.contract_id.or(current_contract_id);
+    let event_name = body.event_name.or(current_event_name);
+
+    // Validate: event_name filter doesn't apply to upgrade subscriptions
+    if kind == "upgrade" && event_name.is_some() {
+        return Err(ApiError::bad_request(
+            "event_name does not apply to an `upgrade` subscription; \
+             use contract_id to watch one contract, or omit it to watch all",
+        ));
+    }
+
+    // Update the subscription
+    let sub: WebhookListRow = sqlx::query_as(
+        "UPDATE webhook_subscriptions
+         SET active = $2, contract_id = $3, event_name = $4
+         WHERE id = $1
+         RETURNING id, url, kind, contract_id, event_name, active, created_at",
+    )
+    .bind(id)
+    .bind(active)
+    .bind(&contract_id)
+    .bind(&event_name)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("subscription not found"))?;
+
+    let (id, url, kind, contract_id, event_name, active, created_at) = sub;
+    Ok(Json(json!({
+        "id": id,
+        "url": url,
+        "kind": kind,
+        "contract_id": contract_id,
+        "event_name": event_name,
+        "active": active,
+        "created_at": created_at,
+    })))
+}
+
 pub async fn delete_webhook(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -126,4 +204,77 @@ pub async fn delete_webhook(
         return Err(ApiError::not_found("subscription not found"));
     }
     Ok(Json(json!({ "deleted": id })))
+}
+
+/// Delivery history row for a webhook subscription.
+type DeliveryRow = (
+    i64,                                    // id
+    String,                                 // status
+    i32,                                    // attempts
+    Option<String>,                         // last_error
+    Option<chrono::DateTime<chrono::Utc>>, // delivered_at
+    chrono::DateTime<chrono::Utc>,         // created_at
+);
+
+pub async fn list_webhook_deliveries(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    // Verify subscription exists
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webhook_subscriptions WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    if !exists {
+        return Err(ApiError::not_found("subscription not found"));
+    }
+
+    // Fetch recent deliveries with pagination (default limit 50, max 500)
+    let deliveries: Vec<DeliveryRow> = sqlx::query_as(
+        "SELECT id, status, attempts, last_error, delivered_at, created_at
+         FROM webhook_deliveries
+         WHERE subscription_id = $1
+         ORDER BY created_at DESC
+         LIMIT 50",
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Fetch summary counts
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+           COUNT(*) FILTER (WHERE status = 'delivered') as delivered_count,
+           COUNT(*) FILTER (WHERE status = 'failed') as failed_count,
+           COUNT(*) FILTER (WHERE status = 'pending') as pending_count
+         FROM webhook_deliveries
+         WHERE subscription_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let delivery_list = deliveries
+        .into_iter()
+        .map(|(id, status, attempts, last_error, delivered_at, created_at)| {
+            json!({
+                "id": id,
+                "status": status,
+                "attempts": attempts,
+                "last_error": last_error,
+                "delivered_at": delivered_at,
+                "created_at": created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "deliveries": delivery_list,
+        "summary": {
+            "delivered": counts.0,
+            "failed": counts.1,
+            "pending": counts.2,
+        }
+    })))
 }

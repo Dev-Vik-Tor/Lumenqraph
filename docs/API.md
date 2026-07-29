@@ -10,6 +10,7 @@ are always public. Rate-limit breaches return `429`; bad/revoked keys `401`.
 ## Public
 
 ### `GET /health`
+Human-readable status: indexing freshness and chain-tip lag.
 ```json
 { "status": "ok", "network": "mainnet",
   "network_passphrase": "Public Global Stellar Network ; September 2015",
@@ -26,6 +27,25 @@ When the operator has mounted sibling instances (`INSTANCE_MOUNTS`, e.g. the
 hosted demo serving a testnet deployment under the same origin), `/health` also
 advertises them as `"mounts": { "testnet": "/testnet" }` — every endpoint
 documented here works under that prefix, served by the sibling.
+
+### `GET /livez`
+Kubernetes-style liveness probe: returns `200 OK` if the process is running,
+nothing else. Requires no database access and no logic beyond "is the server
+listening?" Used by orchestrators to detect dead or stuck processes and restart
+them.
+
+### `GET /readyz`
+Kubernetes-style readiness probe: returns `200 OK` only when the indexer is
+caught up and healthy; otherwise `503 Service Unavailable`. Checks:
+- Database is reachable
+- Cursor has been created (at least one pass through the event stream)
+- Indexing lag is below the threshold (default: 100 ledgers)
+- Cursor was updated recently (default: within 120 seconds)
+
+Used by orchestrators to route traffic only to ready instances and avoid
+cascading restarts during slow startup. Configurable via environment:
+- `READYZ_LAG_THRESHOLD` (ledgers, default 100)
+- `READYZ_MAX_AGE_SECS` (seconds, default 120)
 
 ### `GET /metrics`
 Prometheus text: `lumenqraph_indexer_lag_ledgers`, `lumenqraph_events_total`,
@@ -191,13 +211,28 @@ const c = new ContractClient({ baseUrl: "https://lumenqraph.onrender.com" });
 const pool = await c.get_pool_info(); // typed from the chain's own schema
 ```
 
-Query: `lang` (`ts`, the default and only target so far; anything else is a
-`400`) and `version` (generate from a historical interface version — the client
-your integration was built against *before* an upgrade). Structs become
-interfaces, unit enums become case-name literal types, unions become
-`"Case" | { Case: [...] }` shapes — and because `/call` results are named with
-the same spec, what a call returns is exactly what the next call accepts.
-Generation is deterministic: same interface version, same file.
+Query parameters:
+- `lang` (`ts`, the default and only target so far; anything else is a `400`)
+- `version` (generate from a historical interface version — the client your
+  integration was built against *before* an upgrade; default: current)
+
+The generator maps contract types to TypeScript:
+- Structs → interfaces
+- Unit enums → case-name literal types
+- Unions → `"Case" | { Case: [...] }` shapes
+
+Because `/call` results are named with the same spec, what a call returns is
+exactly what the next call accepts. Generation is deterministic: same interface
+version, same output.
+
+**Limitations:**
+- Stellar Asset Contracts have no WASM spec and cannot be code-generated.
+  Attempt to generate from them returns `404`.
+- Only TypeScript targets are currently supported (`lang=ts`).
+- Some advanced Soroban types may not have complete TypeScript mappings.
+
+**Success response:** The generated TypeScript client source code (content-type:
+`text/plain`). The client is self-contained and zero-dependency.
 
 ## Webhooks (authenticated)
 
@@ -218,6 +253,40 @@ contracts. An `upgrade` delivery is signed identically, and carries:
 
 ### `GET /webhooks`
 Lists subscriptions (secrets omitted).
+
+### `PATCH /webhooks/:id`
+Pause/resume or update a subscription without losing its secret.
+Body: `{ "active": false, "contract_id": null, "event_name": "transfer" }`
+(all fields optional; omitted fields keep their current value).
+
+Returns the updated subscription (secrets omitted). Allows:
+- Toggling the `active` status (true = deliver, false = paused)
+- Updating `contract_id` and `event_name` filters (same validation as creation)
+
+### `GET /webhooks/:id/deliveries`
+Delivery history and status for a subscription. Returns paginated recent
+deliveries (most recent first, limited to 50) with status, attempt count, error
+details, and timestamps. Also includes summary counts (delivered/failed/pending).
+
+```json
+{
+  "deliveries": [
+    {
+      "id": 1234,
+      "status": "delivered",
+      "attempts": 1,
+      "last_error": null,
+      "delivered_at": "2026-07-15T12:34:56Z",
+      "created_at": "2026-07-15T12:34:55Z"
+    }
+  ],
+  "summary": {
+    "delivered": 95,
+    "failed": 5,
+    "pending": 0
+  }
+}
+```
 
 ### `DELETE /webhooks/:id`
 Removes a subscription (and cascades its deliveries).

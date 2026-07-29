@@ -61,6 +61,7 @@ fn build_cors_layer() -> tower_http::cors::CorsLayer {
             .allow_methods([
                 axum::http::Method::GET,
                 axum::http::Method::POST,
+                axum::http::Method::PATCH,
                 axum::http::Method::OPTIONS,
                 axum::http::Method::DELETE,
             ])
@@ -87,6 +88,7 @@ fn build_cors_layer() -> tower_http::cors::CorsLayer {
         cors.allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
+            axum::http::Method::PATCH,
             axum::http::Method::OPTIONS,
             axum::http::Method::DELETE,
         ])
