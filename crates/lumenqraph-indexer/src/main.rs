@@ -3,13 +3,21 @@
 //!
 //! Usage:
 //!   lumenqraph-indexer                    # live tail (default)
-//!   lumenqraph-indexer backfill [LEDGER]  # one-shot catch-up from LEDGER then exit
+//!   lumenqraph-indexer backfill [LEDGER]  # one-shot catch-up within RPC window (~7 days) then exit
+//!   lumenqraph-indexer deep-backfill [OPTIONS]  # gapless history from a data-lake export (#84)
 //!   lumenqraph-indexer inspect <CONTRACT> # print a contract's on-chain interface
+//!
+//! deep-backfill options:
+//!   --from <LEDGER>   Start ledger (required)
+//!   --to   <LEDGER>   End ledger   (default: max / run to EOF of input)
+//!   --source <TYPE>   Source type: galexie (default: galexie)
+//!   --input <PATH>    Input file(s); use '-' for stdin; may be repeated
 
 mod backfill;
 mod config;
 mod convert;
 mod cursor;
+mod deep_backfill;
 mod keys;
 mod poller;
 mod retention;
@@ -79,6 +87,12 @@ async fn main() -> anyhow::Result<()> {
         return backfill::run(pool, rpc, config, from).await;
     }
 
+    // deep-backfill: ingest beyond the RPC retention window from a data-lake
+    // source. Parse manual args: --from, --to, --source, --input (repeatable).
+    if args.get(1).map(String::as_str) == Some("deep-backfill") {
+        return run_deep_backfill(args, pool, config).await;
+    }
+
     info!(
         rpc = %config.rpc_url,
         contracts = ?config.contract_ids,
@@ -123,4 +137,106 @@ async fn inspect(rpc: &RpcClient, contract_id: &str) -> anyhow::Result<()> {
         }
         None => anyhow::bail!("contract has no contractspecv0 interface section"),
     }
+}
+
+/// Parse `deep-backfill` CLI arguments and dispatch to [`deep_backfill::run`].
+///
+/// Accepted flags (space- or `=`-separated):
+///   --from  <ledger>          Start ledger (required)
+///   --to    <ledger>          End ledger   (optional; defaults to "until EOF")
+///   --source <type>           Data source: `galexie` (default)
+///   --input <path>            Input file; use `-` for stdin (may be repeated)
+async fn run_deep_backfill(
+    args: Vec<String>,
+    pool: sqlx::PgPool,
+    config: Config,
+) -> anyhow::Result<()> {
+    use std::path::PathBuf;
+    use deep_backfill::{GalexieSource, HistoricalSource};
+
+    let mut from_ledger: Option<i64> = None;
+    let mut to_ledger: Option<i64> = None;
+    let mut source_type = "galexie".to_string();
+    let mut inputs: Vec<PathBuf> = Vec::new();
+
+    let mut i = 2usize; // skip "lumenqraph-indexer" and "deep-backfill"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--from" => {
+                i += 1;
+                from_ledger = Some(
+                    args.get(i)
+                        .context("--from requires a ledger number")?
+                        .parse::<i64>()
+                        .context("--from: invalid ledger number")?,
+                );
+            }
+            "--to" => {
+                i += 1;
+                to_ledger = Some(
+                    args.get(i)
+                        .context("--to requires a ledger number")?
+                        .parse::<i64>()
+                        .context("--to: invalid ledger number")?,
+                );
+            }
+            "--source" => {
+                i += 1;
+                source_type = args
+                    .get(i)
+                    .context("--source requires a type (e.g. galexie)")?
+                    .clone();
+            }
+            "--input" => {
+                i += 1;
+                inputs.push(PathBuf::from(
+                    args.get(i).context("--input requires a file path")?,
+                ));
+            }
+            flag if flag.starts_with("--from=") => {
+                from_ledger = Some(
+                    flag.trim_start_matches("--from=")
+                        .parse::<i64>()
+                        .context("--from: invalid ledger number")?,
+                );
+            }
+            flag if flag.starts_with("--to=") => {
+                to_ledger = Some(
+                    flag.trim_start_matches("--to=")
+                        .parse::<i64>()
+                        .context("--to: invalid ledger number")?,
+                );
+            }
+            flag if flag.starts_with("--source=") => {
+                source_type = flag.trim_start_matches("--source=").to_string();
+            }
+            flag if flag.starts_with("--input=") => {
+                inputs.push(PathBuf::from(flag.trim_start_matches("--input=")));
+            }
+            other => {
+                anyhow::bail!("unknown deep-backfill flag: {other}");
+            }
+        }
+        i += 1;
+    }
+
+    let from_ledger = from_ledger.context(
+        "deep-backfill requires --from <ledger>\n\
+         Example: lumenqraph-indexer deep-backfill \
+         --from 1000000 --input /data/export.ndjson",
+    )?;
+
+    // Default to stdin when no --input is given.
+    if inputs.is_empty() {
+        inputs.push(PathBuf::from("-"));
+    }
+
+    let source: Box<dyn HistoricalSource> = match source_type.as_str() {
+        "galexie" => Box::new(GalexieSource::new(inputs)),
+        other => anyhow::bail!(
+            "unknown source type '{other}'; supported: galexie"
+        ),
+    };
+
+    deep_backfill::run(pool, config, source, from_ledger, to_ledger).await
 }

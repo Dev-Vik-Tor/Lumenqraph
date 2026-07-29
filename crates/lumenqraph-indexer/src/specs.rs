@@ -43,6 +43,17 @@ impl SpecCache {
         Self::default()
     }
 
+    /// Return the spec for a contract if it is already in the in-memory cache,
+    /// without touching the database or making any network calls. Used by the
+    /// deep-backfill path where RPC is not available.
+    pub fn get_cached(&self, contract_id: &str) -> Option<Arc<ContractSpec>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(contract_id)
+            .and_then(|c| c.spec.clone())
+    }
+
     /// The spec for a contract, fetching+parsing+persisting on first use.
     /// Best-effort: any failure caches `None` and enrichment is simply skipped.
     pub async fn get(

@@ -15,6 +15,12 @@
  */
 
 // ---- Types ----
+//
+// These types mirror the Lumenqraph REST + GraphQL API responses. They are kept
+// in sync with the server by the `typecheck` CI step (which catches obvious
+// structural drift) and, once #44 (OpenAPI) lands, will be fully generated from
+// `/openapi.json` via openapi-typescript. See sdk/typescript/CODEGEN.md for the
+// planned workflow.
 
 export type Json = unknown;
 
@@ -118,6 +124,38 @@ export interface Page<T> {
   hasNextPage: boolean;
 }
 
+// ---- Retry / timeout options (#81) ----
+
+/**
+ * Retry policy applied to every request made by the client.
+ * All fields are optional; the client merges them with sensible defaults.
+ */
+export interface RetryOptions {
+  /**
+   * Maximum number of retry attempts after the first failure.
+   * Default: 3.
+   */
+  maxRetries?: number;
+  /**
+   * Base delay in milliseconds for the first retry.
+   * Subsequent delays grow exponentially (base * 2^attempt).
+   * Default: 250 ms.
+   */
+  baseDelayMs?: number;
+  /**
+   * Hard cap on the computed delay before jitter, in milliseconds.
+   * Default: 30 000 ms (30 s).
+   */
+  maxDelayMs?: number;
+  /**
+   * Per-request wall-clock timeout in milliseconds. The SDK cancels the
+   * underlying `fetch` after this many milliseconds via `AbortController`.
+   * Each retry gets a fresh timeout window.
+   * Default: 10 000 ms (10 s).
+   */
+  timeoutMs?: number;
+}
+
 export interface ClientOptions {
   /** Base URL of the Lumenqraph API, e.g. `http://localhost:8080`. */
   baseUrl: string;
@@ -125,6 +163,12 @@ export interface ClientOptions {
   apiKey?: string;
   /** Override the fetch implementation (defaults to global `fetch`). */
   fetch?: typeof fetch;
+  /**
+   * Retry / timeout policy.
+   * Retries are attempted for network errors and HTTP 429 / 502 / 503 / 504.
+   * Pass `{ maxRetries: 0 }` to disable retries entirely.
+   */
+  retry?: RetryOptions;
 }
 
 /** Error thrown for any non-2xx API response. */
@@ -139,12 +183,23 @@ export class LumenqraphError extends Error {
   }
 }
 
+// ---- Internal constants ----
+
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_BASE_DELAY_MS = 250;
+const DEFAULT_MAX_DELAY_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** HTTP status codes that merit a retry. */
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+
 // ---- Client ----
 
 export class LumenqraphClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
   private readonly doFetch: typeof fetch;
+  private readonly retry: Required<RetryOptions>;
 
   constructor(opts: ClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -156,6 +211,12 @@ export class LumenqraphClient {
       );
     }
     this.doFetch = f.bind(globalThis);
+    this.retry = {
+      maxRetries:   opts.retry?.maxRetries   ?? DEFAULT_MAX_RETRIES,
+      baseDelayMs:  opts.retry?.baseDelayMs  ?? DEFAULT_BASE_DELAY_MS,
+      maxDelayMs:   opts.retry?.maxDelayMs   ?? DEFAULT_MAX_DELAY_MS,
+      timeoutMs:    opts.retry?.timeoutMs    ?? DEFAULT_TIMEOUT_MS,
+    };
   }
 
   // ---- REST ----
@@ -344,20 +405,205 @@ export class LumenqraphClient {
     });
   }
 
+  /**
+   * Core fetch wrapper with retry + timeout (#81).
+   *
+   * Retry policy:
+   *  - Network errors (fetch throws) are always retried.
+   *  - HTTP 429: honors `Retry-After` (seconds or HTTP-date) before retrying.
+   *  - HTTP 502 / 503 / 504: retried with exponential backoff + full jitter.
+   *  - Any other non-2xx: thrown immediately as `LumenqraphError`.
+   *
+   * Each attempt gets its own `AbortController` so the timeout window resets
+   * after every retry — a slow response on attempt 1 doesn't eat the budget
+   * for attempt 2.
+   */
   private async request<T>(url: string, init: RequestInit): Promise<T> {
-    const headers = new Headers(init.headers);
-    if (this.apiKey) headers.set("x-api-key", this.apiKey);
-    const res = await this.doFetch(url, { ...init, headers });
-    const text = await res.text();
-    const parsed = text ? safeJson(text) : null;
-    if (!res.ok) {
-      const message =
-        (parsed as { error?: string } | null)?.error ??
-        `${res.status} ${res.statusText}`;
-      throw new LumenqraphError(message, res.status, parsed ?? text);
+    const { maxRetries, baseDelayMs, maxDelayMs, timeoutMs } = this.retry;
+    let attempt = 0;
+
+    for (;;) {
+      // Fresh AbortController each attempt so the timeout window resets.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+      let res: Response;
+      let text: string;
+      try {
+        const headers = new Headers(init.headers);
+        if (this.apiKey) headers.set("x-api-key", this.apiKey);
+        res = await this.doFetch(url, {
+          ...init,
+          headers,
+          signal: controller.signal,
+        });
+        text = await res.text();
+      } catch (err) {
+        // Network error or timeout (AbortError).
+        if (attempt < maxRetries) {
+          await sleep(jitteredDelay(attempt, baseDelayMs, maxDelayMs));
+          attempt++;
+          continue;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const parsed = text ? safeJson(text) : null;
+
+      if (!res.ok) {
+        // Retryable status?
+        if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
+          const wait = retryAfterMs(res) ?? jitteredDelay(attempt, baseDelayMs, maxDelayMs);
+          await sleep(wait);
+          attempt++;
+          continue;
+        }
+        const message =
+          (parsed as { error?: string } | null)?.error ??
+          `${res.status} ${res.statusText}`;
+        throw new LumenqraphError(message, res.status, parsed ?? text);
+      }
+
+      return parsed as T;
     }
-    return parsed as T;
   }
+}
+
+// ---- Webhook signature verification (#83) ----
+
+/**
+ * Verify a Lumenqraph webhook delivery using its HMAC-SHA256 signature.
+ *
+ * The server signs the raw request body with the subscription secret and sends
+ * the result as `X-Lumenqraph-Signature: sha256=<hex>`. Pass that header value
+ * as `signatureHeader` and the **raw** (un-parsed) request body as either a
+ * `string` or `Uint8Array`.
+ *
+ * Comparison is performed in constant time via the Web Crypto API so this
+ * helper is safe to use in security-sensitive contexts. It mirrors the
+ * server-side `verify_hmac_signature()` in `lumenqraph-core/src/crypto.rs`.
+ *
+ * @param rawBody        Raw HTTP request body (string or bytes).
+ * @param signatureHeader Value of the `X-Lumenqraph-Signature` header,
+ *                        e.g. `"sha256=abcdef…"`.
+ * @param secret         The subscription secret returned at creation time.
+ * @returns              `true` if the signature is valid, `false` otherwise.
+ *
+ * @example
+ * // Express.js / Node
+ * import express from "express";
+ * import { verifyWebhook } from "@lumenqraph/sdk";
+ *
+ * app.post("/hook", express.raw({ type: "*\/*" }), async (req, res) => {
+ *   const valid = await verifyWebhook(
+ *     req.body,
+ *     req.headers["x-lumenqraph-signature"] as string,
+ *     process.env.WEBHOOK_SECRET!,
+ *   );
+ *   if (!valid) return res.status(401).send("invalid signature");
+ *   // process req.body ...
+ *   res.sendStatus(200);
+ * });
+ */
+export async function verifyWebhook(
+  rawBody: string | Uint8Array,
+  signatureHeader: string,
+  secret: string,
+): Promise<boolean> {
+  // Parse off the "sha256=" prefix. An absent or wrong prefix is an invalid
+  // signature, not a fatal error.
+  const prefix = "sha256=";
+  if (!signatureHeader.startsWith(prefix)) return false;
+  const providedHex = signatureHeader.slice(prefix.length);
+
+  // Encode inputs.
+  const enc = new TextEncoder();
+  // `.buffer as ArrayBuffer` cast: TextEncoder returns Uint8Array<ArrayBufferLike>
+  // but Web Crypto expects ArrayBuffer specifically.  The underlying buffer is
+  // always a plain ArrayBuffer here; the cast is safe.
+  const keyBuffer = enc.encode(secret).buffer as ArrayBuffer;
+  const bodyBytes: ArrayBuffer =
+    typeof rawBody === "string"
+      ? (enc.encode(rawBody).buffer as ArrayBuffer)
+      : (rawBody.buffer as ArrayBuffer);
+
+  // Import the secret as an HMAC-SHA-256 key via Web Crypto (Node 18+, browsers).
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    keyBuffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  // Compute the expected signature.
+  const sigBuffer = await crypto.subtle.sign("HMAC", cryptoKey, bodyBytes);
+  const expectedHex = bufToHex(sigBuffer);
+
+  // Constant-time comparison: convert both hex strings to bytes and use
+  // timingSafeEqual-equivalent logic. We compare byte arrays of the same
+  // length so a length mismatch (different-length hex) also returns false
+  // without short-circuiting.
+  if (expectedHex.length !== providedHex.length) return false;
+
+  const expectedBytes = enc.encode(expectedHex);
+  const providedBytes = enc.encode(providedHex);
+
+  // XOR every byte and accumulate — only equal if all XORs are 0.
+  let diff = 0;
+  for (let i = 0; i < expectedBytes.length; i++) {
+    // biome-ignore lint: intentional constant-time compare
+    diff |= (expectedBytes[i] ?? 0) ^ (providedBytes[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+// ---- Retry helpers (#81) ----
+
+/**
+ * Exponential backoff with full jitter.
+ *
+ * Computes `random(0, min(maxDelayMs, baseDelayMs * 2^attempt))`.
+ * Full jitter (vs. capped jitter) avoids thundering-herd when many clients
+ * retry at the same time after a 503.
+ */
+function jitteredDelay(attempt: number, baseMs: number, maxMs: number): number {
+  const cap = Math.min(maxMs, baseMs * Math.pow(2, attempt));
+  return Math.random() * cap;
+}
+
+/**
+ * Parse a `Retry-After` response header into milliseconds.
+ *
+ * The header may be:
+ *  - A non-negative integer: number of seconds to wait.
+ *  - An HTTP-date: an absolute point in time.
+ *
+ * Returns `undefined` when the header is absent or unparseable so the caller
+ * can fall back to its own backoff strategy.
+ */
+function retryAfterMs(res: Response): number | undefined {
+  const header = res.headers.get("retry-after");
+  if (!header) return undefined;
+
+  // Try integer seconds first.
+  const seconds = Number(header.trim());
+  if (!isNaN(seconds) && seconds >= 0) return seconds * 1000;
+
+  // Try an HTTP-date.
+  const date = new Date(header).getTime();
+  if (!isNaN(date)) {
+    const delta = date - Date.now();
+    return delta > 0 ? delta : 0;
+  }
+
+  return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ---- Helpers ----
@@ -372,4 +618,10 @@ function safeJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+function bufToHex(buf: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }

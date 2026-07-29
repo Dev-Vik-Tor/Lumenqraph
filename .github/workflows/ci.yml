@@ -83,22 +83,28 @@ jobs:
       - name: Build (release)
         run: cargo build --workspace --release
 
-  sdk-test:
-    name: TypeScript SDK Tests
+  # TypeScript SDK: typecheck, test (#81 #82 #83), and codegen drift check (#82)
+  sdk-typescript:
+    name: TypeScript SDK
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
       - name: Install dependencies
         run: npm ci
-        working-directory: sdk/typescript
-      - name: Run tests
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
         run: npm test
-        working-directory: sdk/typescript
+      - name: Codegen drift check (#82)
+        run: npm run codegen:check
 
   security-audit:
     name: Security Audit (cargo-audit)

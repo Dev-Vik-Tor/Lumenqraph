@@ -1,0 +1,792 @@
+openapi: "3.1.0"
+info:
+  title: Lumenqraph API
+  version: "0.1.0"
+  description: |
+    Open-source, self-hostable event indexer for Soroban smart contracts on Stellar.
+    Exposes decoded contract events, materialized token transfers, on-chain
+    contract interfaces, read-only view-function calls, and webhook management
+    over a plain REST API.
+  license:
+    name: MIT
+    url: https://github.com/Lumen-Scribe/Lumenqraph/blob/main/LICENSE
+  contact:
+    url: https://github.com/Lumen-Scribe/Lumenqraph
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - ApiKeyHeader: []
+  - ApiKeyBearer: []
+  - {}
+
+# ---------------------------------------------------------------------------
+# Security schemes
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: x-api-key
+    ApiKeyBearer:
+      type: http
+      scheme: bearer
+
+  # ---------------------------------------------------------------------------
+  # Shared schemas
+  # ---------------------------------------------------------------------------
+  schemas:
+    # ---- contracts ----
+    Contract:
+      type: object
+      required: [contract_id, event_count]
+      properties:
+        contract_id:
+          type: string
+          description: Bech32m `C…` contract address.
+        event_count:
+          type: integer
+          format: int64
+        first_seen_ledger:
+          type: integer
+          format: int64
+          nullable: true
+        last_seen_ledger:
+          type: integer
+          format: int64
+          nullable: true
+
+    # ---- events ----
+    EventRecord:
+      type: object
+      required:
+        - event_id
+        - contract_id
+        - ledger
+        - ledger_closed_at
+        - event_type
+        - topics
+        - decoded_topics
+        - value
+        - decoded_value
+        - tx_hash
+        - in_successful_call
+        - paging_token
+        - created_at
+      properties:
+        event_id:
+          type: string
+        contract_id:
+          type: string
+        ledger:
+          type: integer
+          format: int64
+        ledger_closed_at:
+          type: string
+          format: date-time
+        event_type:
+          type: string
+          enum: [contract, system, diagnostic]
+        topics:
+          type: array
+          items:
+            type: string
+          description: Raw base64 XDR topics.
+        decoded_topics:
+          description: Decoded topics as JSON values.
+        event_name:
+          type: string
+          nullable: true
+          description: Best-effort event name (first topic decoded as a symbol).
+        value:
+          type: string
+          description: Raw base64 XDR event body.
+        decoded_value:
+          description: Decoded event body as a JSON value.
+        enriched:
+          nullable: true
+          description: |
+            Named, typed record built from the contract's on-chain spec.
+            `null` when no spec is available for this event.
+        tx_hash:
+          type: string
+        in_successful_call:
+          type: boolean
+        paging_token:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    # ---- transfers ----
+    Transfer:
+      type: object
+      required: [event_id, contract_id, amount, ledger, ledger_closed_at]
+      properties:
+        event_id:
+          type: string
+        contract_id:
+          type: string
+        from_addr:
+          type: string
+          nullable: true
+        to_addr:
+          type: string
+          nullable: true
+        amount:
+          type: string
+          description: Token amount as a decimal string (i128 exceeds JSON integer range).
+        ledger:
+          type: integer
+          format: int64
+        ledger_closed_at:
+          type: string
+          format: date-time
+
+    # ---- state ----
+    StateVersion:
+      type: object
+      required: [ledger, storage, captured_at]
+      properties:
+        ledger:
+          type: integer
+          format: int64
+        storage:
+          description: Decoded contract instance storage as a JSON value.
+        captured_at:
+          type: string
+          format: date-time
+
+    ContractState:
+      type: object
+      required: [contract_id, count, versions]
+      properties:
+        contract_id:
+          type: string
+        count:
+          type: integer
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/StateVersion"
+
+    # ---- per-key data ----
+    DataKey:
+      type: object
+      required: [key_hash, key, durability, ledger, value, captured_at]
+      properties:
+        key_hash:
+          type: string
+        key:
+          description: The storage key as a JSON value.
+        durability:
+          type: string
+          enum: [persistent, temporary]
+        ledger:
+          type: integer
+          format: int64
+        value:
+          description: The decoded value as a JSON value.
+        label:
+          type: string
+          nullable: true
+        captured_at:
+          type: string
+          format: date-time
+
+    ContractData:
+      type: object
+      required: [contract_id, count, keys]
+      properties:
+        contract_id:
+          type: string
+        count:
+          type: integer
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataKey"
+
+    DataKeyVersionEntry:
+      type: object
+      required: [ledger, value, captured_at]
+      properties:
+        ledger:
+          type: integer
+          format: int64
+        value:
+          description: The decoded value at this ledger.
+        captured_at:
+          type: string
+          format: date-time
+
+    DataKeyHistory:
+      type: object
+      required: [contract_id, key_hash, key, durability, count, versions]
+      properties:
+        contract_id:
+          type: string
+        key_hash:
+          type: string
+        key:
+          description: The storage key as a JSON value.
+        durability:
+          type: string
+          enum: [persistent, temporary]
+        label:
+          type: string
+          nullable: true
+        count:
+          type: integer
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataKeyVersionEntry"
+
+    # ---- call / simulate ----
+    CallRequest:
+      type: object
+      required: [function]
+      properties:
+        function:
+          type: string
+        args:
+          description: Arguments by name (object) or as a positional array.
+          nullable: true
+        source_account:
+          type: string
+          nullable: true
+          description: Optional `G…` source account for the simulation.
+
+    CallResult:
+      type: object
+      required: [contract_id, function, result, simulated_at_ledger]
+      properties:
+        contract_id:
+          type: string
+        function:
+          type: string
+        result:
+          description: Typed result decoded from the contract's on-chain spec.
+        simulated_at_ledger:
+          type: integer
+          format: int64
+        events:
+          type: array
+          description: Present for `simulate` — the events the call would emit.
+        min_resource_fee:
+          type: string
+          description: Present for `simulate` — minimum resource fee in stroops.
+          nullable: true
+
+    # ---- webhooks ----
+    WebhookKind:
+      type: string
+      enum: [event, upgrade]
+      description: |
+        `event` — fires when a matching contract event is indexed.
+        `upgrade` — fires when the contract's on-chain interface changes.
+
+    CreateWebhookRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+        kind:
+          $ref: "#/components/schemas/WebhookKind"
+        contract_id:
+          type: string
+          nullable: true
+        event_name:
+          type: string
+          nullable: true
+
+    WebhookSubscription:
+      type: object
+      required: [id, url, kind, active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        kind:
+          $ref: "#/components/schemas/WebhookKind"
+        contract_id:
+          type: string
+          nullable: true
+        event_name:
+          type: string
+          nullable: true
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    WebhookCreated:
+      allOf:
+        - $ref: "#/components/schemas/WebhookSubscription"
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: |
+                HMAC-SHA256 signing secret. Returned only at creation — store it
+                securely; it cannot be retrieved later. Use `verifyWebhook()` in
+                the SDK to verify deliveries.
+
+    # ---- health ----
+    HealthResponse:
+      type: object
+      required: [status, last_processed_ledger, chain_tip_ledger, lag_ledgers]
+      properties:
+        status:
+          type: string
+          enum: [ok, lagging]
+        last_processed_ledger:
+          type: integer
+          format: int64
+        chain_tip_ledger:
+          type: integer
+          format: int64
+        lag_ledgers:
+          type: integer
+          format: int64
+        events_ingested_total:
+          type: integer
+          format: int64
+        errors_total:
+          type: integer
+          format: int64
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ---- error ----
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+  # ---- reusable parameters ----
+  parameters:
+    ContractId:
+      name: contract_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Bech32m `C…` contract address.
+
+    KeyHash:
+      name: key_hash
+      in: path
+      required: true
+      schema:
+        type: string
+
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+      description: Maximum number of results to return.
+
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+      description: Number of results to skip (pagination).
+
+  # ---- reusable responses ----
+  responses:
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    TooManyRequests:
+      description: Rate limit exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness and chain-tip lag report.
+      description: Always public — no auth required.
+      security: []
+      tags: [observability]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /contracts:
+    get:
+      operationId: listContracts
+      summary: Contracts the indexer has seen, with per-contract event counts.
+      tags: [contracts]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Contract"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /contracts/{contract_id}/interface:
+    get:
+      operationId: getContractInterface
+      summary: Decoded on-chain interface (functions, events, types).
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - name: version
+          in: query
+          schema:
+            type: integer
+          description: Return the interface as of a historical version. Default is current.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /contracts/{contract_id}/interface/history:
+    get:
+      operationId: getContractInterfaceHistory
+      summary: Every interface version observed, newest first.
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /contracts/{contract_id}/interface/diff:
+    get:
+      operationId: getContractInterfaceDiff
+      summary: What changed between two interface versions.
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - name: from
+          in: query
+          schema:
+            type: integer
+        - name: to
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: Invalid version range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /contracts/{contract_id}/state:
+    get:
+      operationId: getContractState
+      summary: Versioned snapshots of contract instance storage.
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractState"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /contracts/{contract_id}/data:
+    get:
+      operationId: getContractData
+      summary: Latest value of every per-key storage entry.
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - name: label
+          in: query
+          schema:
+            type: string
+          description: Filter to a discovery label, e.g. `balance`.
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContractData"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /contracts/{contract_id}/data/{key_hash}:
+    get:
+      operationId: getContractDataKey
+      summary: Version history of a single per-key storage entry.
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - $ref: "#/components/parameters/KeyHash"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataKeyHistory"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /contracts/{contract_id}/functions:
+    get:
+      operationId: listContractFunctions
+      summary: Callable functions with typed inputs/outputs.
+      tags: [contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+
+  /contracts/{contract_id}/events:
+    get:
+      operationId: listContractEvents
+      summary: Events for a contract, newest first.
+      tags: [events]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: event_name
+          in: query
+          schema:
+            type: string
+          description: Filter to a specific event name.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EventRecord"
+
+  /contracts/{contract_id}/transfers:
+    get:
+      operationId: listContractTransfers
+      summary: Materialized SEP-41 token transfers, newest first.
+      tags: [transfers]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transfer"
+
+  /contracts/{contract_id}/call:
+    post:
+      operationId: callContractFunction
+      summary: Invoke a view function read-only and get a typed result.
+      tags: [read-layer]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallResult"
+        "400":
+          description: Unknown function or bad arguments.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /contracts/{contract_id}/simulate:
+    post:
+      operationId: simulateContractCall
+      summary: Dry-run any call and preview its result, events, and cost.
+      tags: [read-layer]
+      parameters:
+        - $ref: "#/components/parameters/ContractId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallResult"
+        "400":
+          description: Unknown function or bad arguments.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /webhooks:
+    post:
+      operationId: createWebhook
+      summary: Register a webhook subscription.
+      tags: [webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookRequest"
+      responses:
+        "200":
+          description: Subscription created. The `secret` field is only returned here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookCreated"
+    get:
+      operationId: listWebhooks
+      summary: List webhook subscriptions (secrets omitted).
+      tags: [webhooks]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebhookSubscription"
+
+  /webhooks/{id}:
+    delete:
+      operationId: deleteWebhook
+      summary: Delete a webhook subscription.
+      tags: [webhooks]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /graphql:
+    post:
+      operationId: graphql
+      summary: Execute a GraphQL query.
+      tags: [graphql]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                variables:
+                  type: object
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
