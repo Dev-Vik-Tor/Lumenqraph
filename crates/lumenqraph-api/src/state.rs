@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::call_cache::CallCache;
 use crate::metrics_middleware::MetricsCollector;
 use crate::rate_limit::RateLimiter;
 use crate::rpc::RpcClient;
@@ -38,4 +39,7 @@ pub struct AppState {
     pub rpc_anon_rate_limit: i32,
     /// Per-route request metrics.
     pub metrics: Arc<MetricsCollector>,
+    /// Short-lived read-through cache for `/call` (view-function) results.
+    /// Keyed by (contract_id, function, args). Disabled when TTL is 0.
+    pub call_cache: Arc<CallCache>,
 }

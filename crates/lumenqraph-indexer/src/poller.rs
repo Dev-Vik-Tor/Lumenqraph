@@ -263,30 +263,19 @@ pub async fn fetch_and_store(
     }
 
     // Snapshot per-holder balances discovered from this cycle's token events.
-    // When CONTRACT_IDS is set we only track balances for those contracts.
-    if config.key_indexing {
+    // Keys are batched into chunked getLedgerEntries calls so per-cycle RPC cost
+    // scales with the number of batches, not the number of individual holders.
+    if config.key_indexing && !holders_by_contract.is_empty() {
         let durability = keys::parse_durability(&config.balance_key_durability);
-        for (contract_id, holders) in &holders_by_contract {
-            if !config.contract_ids.is_empty() && !config.contract_ids.contains(contract_id) {
-                continue;
-            }
-            for holder in holders {
-                match keys::balance_key(&config.balance_key_symbol, holder) {
-                    Ok(key) => {
-                        state::snapshot_data(
-                            pool,
-                            rpc,
-                            contract_id,
-                            &key,
-                            durability,
-                            Some("balance"),
-                        )
-                        .await
-                    }
-                    Err(e) => debug!(holder, error = %e, "skipping unbuildable balance key"),
-                }
-            }
-        }
+        state::snapshot_balances_batch(
+            pool,
+            rpc,
+            &holders_by_contract,
+            &config.contract_ids,
+            &config.balance_key_symbol,
+            durability,
+        )
+        .await;
     }
     Ok(total_inserted)
 }

@@ -35,6 +35,7 @@ utoipa = { version = "4", features = ["axum", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 utoipa-redoc = { version = "4", features = ["axum"] }
 parking_lot = "0.12"
+lru = "0.12"
 
 [dev-dependencies]
 # Only for building contract-spec fixtures in the spec-cache tests; the API

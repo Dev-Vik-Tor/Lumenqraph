@@ -54,6 +54,13 @@ pub async fn call_function(
     if !lumenqraph_core::is_valid_contract_id(&contract_id) {
         return Err(ApiError::bad_request("invalid contract id"));
     }
+
+    // Check the read-through cache before hitting RPC.
+    if let Some(cached) = state.call_cache.get(&contract_id, &req.function, &req.args) {
+        return Ok(Json(cached));
+    }
+
+
     let spec = state.specs.current(&state.pool, &contract_id).await?;
 
     let call = read::encode_call(
@@ -70,12 +77,16 @@ pub async fn call_function(
             result_xdr,
             latest_ledger,
             ..
-        } => Ok(Json(json!({
-            "contract_id": contract_id,
-            "function": req.function,
-            "result": read::decode_result(&result_xdr, &call, spec.parsed.as_ref()),
-            "simulated_at_ledger": latest_ledger,
-        }))),
+        } => {
+            let response = json!({
+                "contract_id": contract_id,
+                "function": req.function,
+                "result": read::decode_result(&result_xdr, &call, spec.parsed.as_ref()),
+                "simulated_at_ledger": latest_ledger,
+            });
+            state.call_cache.insert(&contract_id, &req.function, &req.args, response.clone());
+            Ok(Json(response))
+        }
         // A trap / bad call is the caller's problem, not a 500.
         SimOutcome::Error(msg) => Err(ApiError::bad_request(format!("simulation failed: {msg}"))),
     }
