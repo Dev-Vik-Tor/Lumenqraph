@@ -286,7 +286,7 @@ mod integration_tests {
             anon_rate_limit: anon_rate,
             limiter: Arc::new(RateLimiter::new()),
             http_requests: Arc::new(AtomicU64::new(0)),
-            rpc: RpcClient::new("http://127.0.0.1:26657"),
+            rpc: RpcClient::new("http://127.0.0.1:26657", 30),
             specs: Arc::new(SpecCache::new()),
             mounts: Arc::new(vec![]),
             rpc_limiter: Arc::new(RateLimiter::new()),

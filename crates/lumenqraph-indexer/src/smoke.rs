@@ -176,6 +176,8 @@ mod tests {
             retention_ledgers: 0,
             upgrade_watch: false,
             reorg_overlap_ledgers: 0,
+            rpc_timeout_secs: 30,
+            key_templates: vec![],
         }
     }
 
@@ -208,7 +210,7 @@ mod tests {
         )
         .await;
 
-        let rpc = RpcClient::new(&rpc_url);
+        let rpc = RpcClient::new(&rpc_url, 30);
         let config = test_config(&rpc_url, 2);
         let specs = SpecCache::new();
 

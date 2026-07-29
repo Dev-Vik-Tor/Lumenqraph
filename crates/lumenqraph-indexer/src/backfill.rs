@@ -147,6 +147,8 @@ mod tests {
             retention_ledgers: 0,
             upgrade_watch: false,
             reorg_overlap_ledgers: 0,
+            rpc_timeout_secs: 30,
+            key_templates: vec![],
         }
     }
 
@@ -178,7 +180,7 @@ mod tests {
         )
         .await;
 
-        let rpc = RpcClient::new(&rpc_url);
+        let rpc = RpcClient::new(&rpc_url, 30);
         let config = test_config(&rpc_url, 2);
         let specs = SpecCache::new();
 
@@ -225,7 +227,7 @@ mod tests {
         };
 
         let rpc_url = spawn_mock_rpc(1000, make_pages()).await;
-        let rpc = RpcClient::new(&rpc_url);
+        let rpc = RpcClient::new(&rpc_url, 30);
         let config = test_config(&rpc_url, 2);
 
         // First run: all three events are new.
@@ -237,7 +239,7 @@ mod tests {
 
         // Second run against a fresh mock that serves the same pages.
         let rpc_url2 = spawn_mock_rpc(1000, make_pages()).await;
-        let rpc2 = RpcClient::new(&rpc_url2);
+        let rpc2 = RpcClient::new(&rpc_url2, 30);
         let specs2 = SpecCache::new();
         let second = fetch_and_store(&pool, &rpc2, &config, &specs2, 500, 1000)
             .await
@@ -273,7 +275,7 @@ mod tests {
         )
         .await;
 
-        let rpc = RpcClient::new(&rpc_url);
+        let rpc = RpcClient::new(&rpc_url, 30);
         let config = test_config(&rpc_url, 2);
         let specs = SpecCache::new();
 

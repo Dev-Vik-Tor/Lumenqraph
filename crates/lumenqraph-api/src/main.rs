@@ -112,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = std::env::var("API_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let rpc_url = std::env::var("RPC_URL")
         .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string());
+    let rpc_timeout_secs: u64 = env_parse("RPC_TIMEOUT_SECS", 30u64);
 
     let pool = PgPoolOptions::new()
         .max_connections(env_parse("DATABASE_MAX_CONNECTIONS", 10u32))
@@ -139,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
         anon_rate_limit: env_parse("ANON_RATE_LIMIT_PER_MIN", 60),
         limiter: Arc::new(RateLimiter::new()),
         http_requests: Arc::new(AtomicU64::new(0)),
-        rpc: rpc::RpcClient::new(rpc_url),
+        rpc: rpc::RpcClient::new(rpc_url, rpc_timeout_secs),
         specs: Arc::new(specs::SpecCache::new()),
         mounts: Arc::new(routes::proxy::mounts_from_env()),
         rpc_limiter: Arc::new(RateLimiter::new()),

@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use stellar_xdr::curr::{
     ContractDataDurability, ContractExecutable, LedgerEntryData, LedgerKey, LedgerKeyContractCode,
@@ -145,12 +146,12 @@ pub struct EventInfo {
 }
 
 impl RpcClient {
-    pub fn new(url: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>, timeout_secs: u64) -> Self {
         // A request timeout is essential for a 24/7 poller: without it, a hung
         // RPC connection blocks the poll loop indefinitely and the backoff path
         // (which only fires on an error) is never reached.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
         Self {
@@ -167,37 +168,113 @@ impl RpcClient {
         method: &str,
         params: P,
     ) -> anyhow::Result<R> {
-        self.calls_made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         let req = RpcRequest {
             jsonrpc: "2.0",
             id: 1,
             method,
             params,
         };
-        let resp: RpcResponse<R> = self
-            .http
-            .post(&self.url)
-            .json(&req)
-            .send()
-            .await
-            .with_context(|| format!("rpc {method} request failed"))?
-            .error_for_status()
-            .with_context(|| format!("rpc {method} returned http error"))?
-            .json()
-            .await
-            .with_context(|| format!("rpc {method} response decode failed"))?;
+        let body = serde_json::to_vec(&req).with_context(|| format!("rpc {method} serialize"))?;
 
-        if let Some(err) = resp.error {
-            self.calls_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Track -32001 processing limit errors separately for quota monitoring
-            if err.code == -32001 {
-                self.calls_failed_32001.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Bounded retry with jittered exponential backoff for transient failures.
+        // Attempt 1 → delay ~1s → Attempt 2 → delay ~2s → Attempt 3 (final).
+        const MAX_ATTEMPTS: u32 = 3;
+        // Base delays in millis between successive attempts (before jitter).
+        const BASE_DELAYS_MS: [u64; 2] = [1_000, 2_000];
+
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            // Count each actual HTTP attempt so operators can see retry activity
+            // in Prometheus without needing to diff success/error counters.
+            self.calls_made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if attempt > 0 {
+                let base_ms = BASE_DELAYS_MS[(attempt - 1) as usize];
+                // ±25% uniform jitter to avoid retry storms from multiple pollers.
+                let jitter_ms = rand::thread_rng().gen_range(0..=(base_ms / 2)) as i64
+                    - (base_ms / 4) as i64;
+                let delay_ms = ((base_ms as i64) + jitter_ms).max(1) as u64;
+                tracing::warn!(
+                    method,
+                    attempt,
+                    delay_ms,
+                    "transient rpc failure; retrying after delay"
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
-            return Err(anyhow!("rpc {method} error {}: {}", err.code, err.message));
+
+            // Each attempt gets a fresh serialized body clone (reqwest consumes it).
+            let result = self
+                .http
+                .post(&self.url)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .await;
+
+            // Classify network-level failures: always retryable.
+            let response = match result {
+                Err(e) => {
+                    last_err = Some(anyhow!(e).context(format!("rpc {method} request failed")));
+                    continue; // retry
+                }
+                Ok(r) => r,
+            };
+
+            // Classify HTTP-level failures.
+            let response = match response.error_for_status() {
+                Err(e) => {
+                    let status = e.status();
+                    let is_5xx = status.map_or(false, |s| s.is_server_error());
+                    let ctx_err = anyhow!(e).context(format!("rpc {method} returned http error"));
+                    if is_5xx {
+                        last_err = Some(ctx_err);
+                        continue; // retry on 5xx
+                    }
+                    // 4xx and other client errors are permanent — fail fast.
+                    self.calls_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Err(ctx_err);
+                }
+                Ok(r) => r,
+            };
+
+            let resp: RpcResponse<R> = match response.json().await {
+                Err(e) => {
+                    // A JSON decode failure on an otherwise-successful HTTP response
+                    // is usually a truncated/garbled body — treat as transient.
+                    last_err = Some(anyhow!(e).context(format!("rpc {method} response decode failed")));
+                    continue; // retry
+                }
+                Ok(r) => r,
+            };
+
+            if let Some(err) = resp.error {
+                self.calls_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if err.code == -32001 {
+                    // -32001: "processing limit" — the RPC is overloaded.
+                    // Transient; retry with backoff.
+                    self.calls_failed_32001.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    last_err = Some(anyhow!(
+                        "rpc {method} error {}: {}",
+                        err.code,
+                        err.message
+                    ));
+                    continue; // retry
+                }
+                // Any other RPC error (bad params, unknown method, etc.) is a
+                // logic bug, not transience — surface it immediately.
+                return Err(anyhow!("rpc {method} error {}: {}", err.code, err.message));
+            }
+
+            return resp
+                .result
+                .ok_or_else(|| anyhow!("rpc {method} returned no result"));
         }
-        resp.result
-            .ok_or_else(|| anyhow!("rpc {method} returned no result"))
+
+        // All attempts exhausted.
+        self.calls_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(last_err.unwrap_or_else(|| anyhow!("rpc {method} failed after {MAX_ATTEMPTS} attempts")))
     }
 
     /// Current tip ledger sequence.
@@ -504,5 +581,166 @@ mod tests {
 
         let err = event_filters(&ids(26)).err().unwrap().to_string();
         assert!(err.contains("at most 25"), "unexpected error: {err}");
+    }
+
+    // ── Retry logic tests ─────────────────────────────────────────────────
+    //
+    // Spin up a tiny axum server that counts requests and returns a controlled
+    // sequence of responses; verify the RpcClient retries on transient errors
+    // and surfaces them correctly when all attempts are exhausted.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    // ── helpers ───────────────────────────────────────────────────────────
+
+    /// Spin up a mock server whose handler decides what to return based on
+    /// `attempt_count` (incremented each request). Returns the server URL.
+    async fn spawn_counting_mock(
+        count: Arc<AtomicUsize>,
+        make_response: Arc<dyn Fn(usize) -> (u16, &'static str) + Send + Sync + 'static>,
+    ) -> String {
+        #[derive(Clone)]
+        struct S {
+            count: Arc<AtomicUsize>,
+            responder: Arc<dyn Fn(usize) -> (u16, &'static str) + Send + Sync + 'static>,
+        }
+        async fn handler(State(s): State<S>) -> axum::response::Response {
+            let n = s.count.fetch_add(1, Ordering::SeqCst);
+            let (status, body) = (s.responder)(n);
+            axum::response::Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        }
+        let state = S { count, responder: make_response };
+        let app = Router::new().route("/", post(handler)).with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    // Success response body for getLatestLedger.
+    const OK_SEQ_1000: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"sequence":1000}}"#;
+    const OK_SEQ_2000: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"sequence":2000}}"#;
+    const ERR_32001: &str = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"processing limit reached"}}"#;
+    const ERR_32602: &str = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}"#;
+
+    #[tokio::test]
+    async fn retries_on_5xx_and_eventually_succeeds() {
+        // One 500 then a 200 — should succeed on the second attempt.
+        let count = Arc::new(AtomicUsize::new(0));
+        let url = spawn_counting_mock(
+            count.clone(),
+            Arc::new(|n| if n < 1 { (500, "") } else { (200, OK_SEQ_1000) }),
+        )
+        .await;
+
+        let client = RpcClient::new(&url, 5);
+        let seq: i64 = client
+            .get_latest_ledger()
+            .await
+            .expect("should succeed after retry");
+        assert_eq!(seq, 1000);
+        assert_eq!(count.load(Ordering::SeqCst), 2, "must have made exactly 2 attempts");
+    }
+
+    #[tokio::test]
+    async fn exhausts_all_attempts_on_persistent_5xx() {
+        // Always 500 — all MAX_ATTEMPTS (3) should be exhausted.
+        let count = Arc::new(AtomicUsize::new(0));
+        let url = spawn_counting_mock(
+            count.clone(),
+            Arc::new(|_| (500, "")),
+        )
+        .await;
+
+        let client = RpcClient::new(&url, 5);
+        let err = client
+            .get_latest_ledger()
+            .await
+            .expect_err("should fail after all attempts exhausted");
+        assert!(
+            err.to_string().contains("http error"),
+            "unexpected error message: {err}"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "must attempt exactly MAX_ATTEMPTS=3 times"
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_on_4xx() {
+        // HTTP 400 is a client error — should fail immediately without retrying.
+        let count = Arc::new(AtomicUsize::new(0));
+        let url = spawn_counting_mock(
+            count.clone(),
+            Arc::new(|_| (400, "")),
+        )
+        .await;
+
+        let client = RpcClient::new(&url, 5);
+        let err = client
+            .get_latest_ledger()
+            .await
+            .expect_err("4xx should fail immediately");
+        assert!(
+            err.to_string().contains("http error"),
+            "unexpected error message: {err}"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1, "must not retry on 4xx");
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_on_non_transient_rpc_error() {
+        // RPC error -32602 (bad params) should surface immediately without retrying.
+        let count = Arc::new(AtomicUsize::new(0));
+        let url = spawn_counting_mock(
+            count.clone(),
+            Arc::new(|_| (200, ERR_32602)),
+        )
+        .await;
+
+        let client = RpcClient::new(&url, 5);
+        let err = client
+            .get_latest_ledger()
+            .await
+            .expect_err("non-transient rpc error should fail immediately");
+        assert!(
+            err.to_string().contains("-32602"),
+            "unexpected error message: {err}"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "must not retry on non-transient rpc error codes"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_on_rpc_32001_processing_limit() {
+        // -32001 twice then success — should succeed on the third attempt.
+        let count = Arc::new(AtomicUsize::new(0));
+        let url = spawn_counting_mock(
+            count.clone(),
+            Arc::new(|n| if n < 2 { (200, ERR_32001) } else { (200, OK_SEQ_2000) }),
+        )
+        .await;
+
+        let client = RpcClient::new(&url, 5);
+        let seq: i64 = client
+            .get_latest_ledger()
+            .await
+            .expect("should succeed on third attempt after two -32001 errors");
+        assert_eq!(seq, 2000);
+        assert_eq!(count.load(Ordering::SeqCst), 3, "must have made exactly 3 attempts");
     }
 }
