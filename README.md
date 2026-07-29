@@ -85,7 +85,7 @@ Lumenqraph's angle is **simplicity, self-hostability, and typed decoding that ne
 
 ## Architecture
 
-Lumenqraph is a Rust workspace of three service binaries sharing one core library. The services coordinate only through Postgres, so each can scale, restart, and fail independently — API traffic can never stall ingestion, and a decode bug can't take down the read path.
+Lumenqraph is a Rust workspace of four service binaries sharing one core library. The services coordinate only through Postgres, so each can scale, restart, and fail independently — API traffic can never stall ingestion, and a decode bug can't take down the read path.
 
 ```
   Soroban RPC ──poll getEvents──▶ ┌───────────┐ ──write──▶ ┌────────────┐ ◀──read── ┌─────────┐ ──REST──▶ dApps
@@ -579,7 +579,7 @@ Lumenqraph/
 │   ├── lumenqraph-webhooks/   # subscription matching + signed delivery
 │   └── lumenqraph-mcp/        # Model Context Protocol server for AI agents
 ├── sdk/typescript/            # @lumenqraph/sdk — typed REST + GraphQL client
-├── migrations/                # ordered sqlx SQL migrations (0001–0006)
+├── migrations/                # ordered sqlx SQL migrations
 ├── docs/                      # ARCHITECTURE, API, DEPLOYMENT
 ├── explorer/                  # zero-build explorer + self-host dashboard
 ├── scripts/                   # gen_api_key, backfill, setup_db
@@ -632,6 +632,8 @@ Contributions toward any of these are very welcome — see [Contributing](#contr
 ## Contributing
 
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and conventions. Good first issues are labelled in the [issue tracker](https://github.com/Lumen-Scribe/Lumenqraph/issues).
+
+See [CHANGELOG.md](CHANGELOG.md) for release history and versioning policy.
 
 ## License
 
