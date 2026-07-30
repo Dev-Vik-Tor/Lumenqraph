@@ -26,13 +26,13 @@ jobs:
     steps:
       # ── Checkout ─────────────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # ── Node setup — also configures the npm registry + auth token ───────────
       # Using actions/setup-node's registry-url wires NODE_AUTH_TOKEN into the
       # .npmrc that npm reads, so no manual .npmrc editing is needed.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
