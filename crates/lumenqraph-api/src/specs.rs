@@ -61,8 +61,8 @@ impl SpecCache {
     }
 
     /// The contract's *current* interface, revalidated against its stored
-    /// `wasm_hash`. `404` when no interface is indexed (or the contract is a
-    /// Stellar Asset Contract, which has no spec at all).
+    /// `wasm_hash`. `404` with a precise message for SACs (which have no spec)
+    /// or contracts that haven't been indexed yet.
     pub async fn current(&self, pool: &PgPool, contract_id: &str) -> ApiResult<Arc<CachedSpec>> {
         // In tests the cache may be pre-populated via `seed()` to avoid a DB
         // round-trip. A seeded entry uses the sentinel hash "test-hash".
@@ -78,7 +78,26 @@ impl SpecCache {
                 .bind(contract_id)
                 .fetch_optional(pool)
                 .await?;
-        let wasm_hash = row.map(|r| r.0).ok_or_else(not_indexed)?;
+        let wasm_hash = match row.map(|r| r.0) {
+            Some(hash) => hash,
+            None => {
+                // Not in contract_specs; check if it's a SAC (has events but no WASM)
+                let has_events: Option<(i64,)> = sqlx::query_as(
+                    "SELECT 1 FROM events WHERE contract_id = $1 LIMIT 1"
+                )
+                .bind(contract_id)
+                .fetch_optional(pool)
+                .await?;
+                if has_events.is_some() {
+                    return Err(ApiError::not_found(
+                        "Stellar Asset Contract: no on-chain WASM interface. \
+                         SACs publish only standard SEP-41 token conventions; \
+                         use token metadata endpoints instead of /call."
+                    ));
+                }
+                return Err(not_indexed());
+            }
+        };
 
         if let Some((hash, spec)) = self.current.read().unwrap().get(contract_id) {
             if *hash == wasm_hash {

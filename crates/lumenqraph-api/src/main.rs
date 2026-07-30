@@ -34,7 +34,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use call_cache::CallCache;
 use rate_limit::RateLimiter;
-use state::AppState;
+use state::{AppState, BuildInfo};
 
 fn env_bool(key: &str, default: bool) -> bool {
     std::env::var(key)
@@ -48,6 +48,15 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn version_string() -> String {
+    format!(
+        "lumenqraph-api {}\ncommit: {}\nbuilt: {}",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("LUMENQRAPH_GIT_SHA").unwrap_or("unknown"),
+        option_env!("LUMENQRAPH_BUILD_TIME").unwrap_or("unknown"),
+    )
 }
 
 fn build_cors_layer() -> tower_http::cors::CorsLayer {
@@ -102,6 +111,12 @@ fn build_cors_layer() -> tower_http::cors::CorsLayer {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("--version") {
+        println!("{}", version_string());
+        return Ok(());
+    }
+
     let _ = dotenvy::dotenv();
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
@@ -134,6 +149,16 @@ async fn main() -> anyhow::Result<()> {
         env_parse("CALL_CACHE_TTL_SECS", 5u64),
     ));
 
+    let build_info = Arc::new(BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: option_env!("LUMENQRAPH_GIT_SHA")
+            .unwrap_or("unknown")
+            .to_string(),
+        build_time: option_env!("LUMENQRAPH_BUILD_TIME")
+            .unwrap_or("unknown")
+            .to_string(),
+    });
+
     let state = AppState {
         pool,
         require_auth: env_bool("REQUIRE_API_KEY", false),
@@ -148,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
         rpc_anon_rate_limit: env_parse("RPC_ROUTE_RATE_LIMIT_PER_MIN", 10),
         metrics: Arc::new(metrics_middleware::MetricsCollector::new()),
         call_cache,
+        build_info,
     };
 
     let cors_layer = build_cors_layer();

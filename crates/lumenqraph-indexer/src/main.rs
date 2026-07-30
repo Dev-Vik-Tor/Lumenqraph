@@ -42,6 +42,18 @@ use rpc_client::RpcClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.get(1).map(|s| s.as_str()) == Some("--version") {
+        println!(
+            "lumenqraph-indexer {}\ncommit: {}\nbuilt: {}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("LUMENQRAPH_GIT_SHA").unwrap_or("unknown"),
+            option_env!("LUMENQRAPH_BUILD_TIME").unwrap_or("unknown"),
+        );
+        return Ok(());
+    }
+
     let _ = dotenvy::dotenv();
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
@@ -50,7 +62,6 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env()?;
     let rpc = RpcClient::new(config.rpc_url.clone(), config.rpc_timeout_secs);
-    let args: Vec<String> = std::env::args().collect();
 
     // `inspect` needs only RPC — handle it before touching the database.
     if args.get(1).map(String::as_str) == Some("inspect") {
