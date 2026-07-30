@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::config::Config;
+use futures::stream::{self, StreamExt};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -166,6 +167,7 @@ async fn enqueue_upgrades(pool: &PgPool, batch: i64) -> anyhow::Result<u64> {
 #[derive(Clone)]
 struct DueDelivery {
     id: i64,
+    subscription_id: String,
     attempts: i32,
     url: String,
     secret: String,
@@ -180,8 +182,8 @@ struct DueDelivery {
 /// tagged, since they're a new shape and a consumer receiving one should be able
 /// to tell what it is.
 async fn fetch_due(pool: &PgPool, batch: i64) -> anyhow::Result<Vec<DueDelivery>> {
-    let rows: Vec<(i64, i32, String, String, Json<serde_json::Value>)> = sqlx::query_as(
-        "SELECT d.id, d.attempts, s.url, s.secret,
+    let rows: Vec<(i64, String, i32, String, String, Json<serde_json::Value>)> = sqlx::query_as(
+        "SELECT d.id, s.id, d.attempts, s.url, s.secret,
                 CASE WHEN d.upgrade_id IS NOT NULL THEN
                     jsonb_build_object(
                         'type',               'contract.upgraded',
@@ -210,10 +212,11 @@ async fn fetch_due(pool: &PgPool, batch: i64) -> anyhow::Result<Vec<DueDelivery>
         .into_iter()
         .map(|r| DueDelivery {
             id: r.0,
-            attempts: r.1,
-            url: r.2,
-            secret: r.3,
-            payload: r.4,
+            subscription_id: r.1,
+            attempts: r.2,
+            url: r.3,
+            secret: r.4,
+            payload: r.5,
         })
         .collect())
 }
@@ -230,30 +233,63 @@ pub async fn deliver(
     }
 
     let per_host_limits = build_per_host_limits(&deliveries, config.max_concurrent_per_host);
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_deliveries));
+    let config = Arc::new(config.clone());
 
-    let mut delivered = 0u64;
-    let mut failed = 0u64;
-    for d in deliveries {
-        let host = extract_host(&d.url);
-        let semaphore = per_host_limits
-            .get(&host)
-            .expect("host should have a semaphore");
+    let results: Vec<_> = stream::iter(deliveries)
+        .map(|d| {
+            let pool = pool.clone();
+            let http = http.clone();
+            let config = config.clone();
+            let semaphore = semaphore.clone();
+            let per_host_limits = per_host_limits.clone();
 
-        let _permit = semaphore.acquire().await?;
+            async move {
+                let host = extract_host(&d.url);
+                let host_semaphore = per_host_limits
+                    .get(&host)
+                    .expect("host should have a semaphore");
 
-        match send(http, &d, config).await {
-            Ok(()) => {
-                mark_delivered(pool, d.id).await?;
-                delivered += 1;
+                let _permit = semaphore.acquire().await.ok()?;
+                let _host_permit = host_semaphore.acquire().await.ok()?;
+
+                match send(&http, &d, &config).await {
+                    Ok(()) => {
+                        let _ = mark_delivered(&pool, d.id).await;
+                        let _ = sqlx::query(
+                            "UPDATE webhook_subscriptions SET consecutive_failures = 0 WHERE id = $1"
+                        )
+                        .bind(&d.subscription_id)
+                        .execute(&pool)
+                        .await;
+                        Some((true, d.subscription_id.clone()))
+                    }
+                    Err(e) => {
+                        let _ = mark_retry(&pool, &d, &e.to_string(), config.max_attempts).await;
+                        warn!(delivery = d.id, url = %d.url, error = %e, "webhook delivery failed");
+
+                        let _ = sqlx::query(
+                            "UPDATE webhook_subscriptions SET consecutive_failures = consecutive_failures + 1 WHERE id = $1"
+                        )
+                        .bind(&d.subscription_id)
+                        .execute(&pool)
+                        .await;
+
+                        let _ = check_and_auto_disable(&pool, &d.subscription_id, config.failure_threshold).await;
+
+                        Some((false, d.subscription_id.clone()))
+                    }
+                }
             }
-            Err(e) => {
-                mark_retry(pool, &d, &e.to_string(), config.max_attempts).await?;
-                failed += 1;
-                warn!(delivery = d.id, url = %d.url, error = %e, "webhook delivery failed");
-            }
-        }
-    }
-    if delivered > 0 {
+        })
+        .buffer_unordered(config.max_concurrent_deliveries)
+        .collect()
+        .await;
+
+    let delivered = results.iter().filter(|r| r.map_or(false, |(s, _)| s)).count() as u64;
+    let failed = results.iter().filter(|r| r.map_or(false, |(s, _)| !s)).count() as u64;
+
+    if delivered > 0 || failed > 0 {
         info!(delivered, failed, "webhook deliveries processed");
     }
     Ok((delivered, failed))
@@ -282,6 +318,7 @@ fn extract_host(url: &str) -> String {
 
 async fn send(http: &reqwest::Client, d: &DueDelivery, config: &Config) -> anyhow::Result<()> {
     let body = serde_json::to_vec(&d.payload.0)?;
+    let timestamp = Utc::now().to_rfc3339();
 
     // Compute HMAC-SHA256 signature using the webhook secret.
     // NOTE: Verification of received signatures should use constant-time comparison
@@ -292,11 +329,20 @@ async fn send(http: &reqwest::Client, d: &DueDelivery, config: &Config) -> anyho
     mac.update(&body);
     let signature = hex::encode(mac.finalize().into_bytes());
 
+    // Determine event type from payload
+    let event_type = d.payload.0.get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("contract.event");
+
     let req = http
         .post(&d.url)
         .timeout(config.total_timeout())
         .header("Content-Type", "application/json")
         .header("X-Lumenqraph-Signature", format!("sha256={signature}"))
+        .header("X-Lumenqraph-Delivery-Id", d.id.to_string())
+        .header("X-Lumenqraph-Timestamp", timestamp)
+        .header("X-Lumenqraph-Attempt", d.attempts.to_string())
+        .header("X-Lumenqraph-Event", event_type)
         .header("User-Agent", "lumenqraph-webhooks/0.1")
         .body(body)
         .build()
@@ -333,6 +379,8 @@ async fn mark_retry(
     err: &str,
     max_attempts: i32,
 ) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
     let attempts = d.attempts + 1;
     if attempts >= max_attempts {
         sqlx::query(
@@ -343,12 +391,9 @@ async fn mark_retry(
         .bind(d.id)
         .bind(attempts)
         .bind(err)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     } else {
-        // Exponential backoff with full jitter: 2^attempts seconds, capped at 1 hour.
-        // Full jitter: sleep = random_between(0, min(cap, base * 2^attempts))
-        // This spreads out retries to prevent thundering herd when a subscriber recovers.
         let max_secs = 2i64.saturating_pow(attempts as u32).min(3600);
         let mut rng = rand::thread_rng();
         let jittered_secs = rng.gen_range(0..=max_secs);
@@ -362,8 +407,47 @@ async fn mark_retry(
         .bind(attempts)
         .bind(err)
         .bind(next)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn check_and_auto_disable(
+    pool: &PgPool,
+    subscription_id: &str,
+    failure_threshold: i32,
+) -> anyhow::Result<()> {
+    let consecutive_failures: i32 = sqlx::query_scalar(
+        "SELECT consecutive_failures FROM webhook_subscriptions WHERE id = $1",
+    )
+    .bind(subscription_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(0);
+
+    if consecutive_failures >= failure_threshold {
+        let reason = format!(
+            "Auto-disabled after {} consecutive delivery failures",
+            consecutive_failures
+        );
+        sqlx::query(
+            "UPDATE webhook_subscriptions
+             SET active = false, auto_disabled_at = now(), auto_disabled_reason = $2
+             WHERE id = $1",
+        )
+        .bind(subscription_id)
+        .bind(&reason)
         .execute(pool)
         .await?;
+
+        warn!(
+            subscription_id = subscription_id,
+            consecutive_failures = consecutive_failures,
+            "webhook subscription auto-disabled"
+        );
     }
     Ok(())
 }
