@@ -96,7 +96,7 @@ pub async fn proxy(
             tracing::warn!(error = %e, url, "mounted instance unreachable");
             return (
                 StatusCode::BAD_GATEWAY,
-                axum::Json(json!({ "error": "mounted instance unreachable" })),
+                axum::Json(json!({ "code": "bad_gateway", "error": "mounted instance unreachable" })),
             )
                 .into_response();
         }
@@ -110,7 +110,7 @@ pub async fn proxy(
             tracing::warn!(error = %e, url, "mounted instance response failed mid-body");
             return (
                 StatusCode::BAD_GATEWAY,
-                axum::Json(json!({ "error": "mounted instance response failed" })),
+                axum::Json(json!({ "code": "bad_gateway", "error": "mounted instance response failed" })),
             )
                 .into_response();
         }

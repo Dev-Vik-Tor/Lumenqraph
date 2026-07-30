@@ -128,6 +128,12 @@ pub fn router(state: AppState) -> Router {
             "/contracts/:contract_id/swaps",
             get(swaps::list_swaps),
         )
+        // Single-event and by-transaction lookups (#123, #124).
+        .route("/events/:event_id", get(events::get_event))
+        .route(
+            "/transactions/:tx_hash/events",
+            get(events::transaction_events),
+        )
         .route(
             "/webhooks",
             post(webhooks::create_webhook).get(webhooks::list_webhooks),

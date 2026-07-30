@@ -204,3 +204,79 @@ pub async fn list_events(
         next_cursor,
     }))
 }
+
+/// `GET /events/:event_id` — fetch a single event by its unique id.
+///
+/// Returns the full [`EventRow`] (raw XDR, decoded JSON, and enriched record)
+/// or `404` when no event with that id has been indexed.
+pub async fn get_event(
+    State(state): State<AppState>,
+    Path(event_id): Path<String>,
+) -> ApiResult<Json<EventRow>> {
+    let row: Option<EventRow> = sqlx::query_as(
+        "SELECT event_id, contract_id, ledger, ledger_closed_at, event_type,
+                topics, decoded_topics, event_name, value, decoded_value,
+                enriched, tx_hash, in_successful_call, paging_token, created_at
+         FROM events
+         WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    match row {
+        Some(event) => Ok(Json(event)),
+        None => Err(ApiError::not_found(format!(
+            "no event found with id '{event_id}'"
+        ))),
+    }
+}
+
+/// `GET /transactions/:tx_hash/events` — all indexed events for a transaction.
+///
+/// Returns events ordered by `(ledger ASC, event_id ASC)` — the same order
+/// they were emitted on-chain. Supports an optional `limit` query parameter
+/// (1–1000, default 100).
+pub async fn transaction_events(
+    State(state): State<AppState>,
+    Path(tx_hash): Path<String>,
+    Query(q): Query<TxEventsQuery>,
+) -> ApiResult<Json<TxEventsResponse>> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+
+    let events: Vec<EventRow> = sqlx::query_as(
+        "SELECT event_id, contract_id, ledger, ledger_closed_at, event_type,
+                topics, decoded_topics, event_name, value, decoded_value,
+                enriched, tx_hash, in_successful_call, paging_token, created_at
+         FROM events
+         WHERE tx_hash = $1
+         ORDER BY ledger ASC, event_id ASC
+         LIMIT $2",
+    )
+    .bind(&tx_hash)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(TxEventsResponse {
+        tx_hash,
+        count: events.len(),
+        data: events,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct TxEventsQuery {
+    /// Maximum events to return (1–1000, default 100).
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct TxEventsResponse {
+    /// The transaction hash that was queried.
+    pub tx_hash: String,
+    /// Number of events in this response.
+    pub count: usize,
+    /// The event rows, ordered by ledger and event_id ascending.
+    pub data: Vec<EventRow>,
+}

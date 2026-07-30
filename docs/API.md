@@ -7,6 +7,29 @@ Auth: data routes accept an API key via `Authorization: Bearer <key>` or
 callers are allowed up to `ANON_RATE_LIMIT_PER_MIN`. `/health` and `/metrics`
 are always public. Rate-limit breaches return `429`; bad/revoked keys `401`.
 
+## Error responses
+
+Every error response includes a stable `code` field alongside the human-readable
+`error` message:
+
+```json
+{ "code": "not_found", "error": "no event found with id '...'" }
+```
+
+Use the `code` field — not the `error` string — to branch in SDKs and integrations.
+Error messages are intended for humans and may change between versions; codes are
+stable and will not be renamed or removed.
+
+| Code                | HTTP status | When                                                                  |
+|---------------------|-------------|-----------------------------------------------------------------------|
+| `bad_request`       | 400         | Malformed input, invalid parameter value, or wrong argument type.    |
+| `unauthorized`      | 401         | Missing, invalid, or revoked API key.                                 |
+| `not_found`         | 404         | The requested resource does not exist.                                |
+| `rate_limited`      | 429         | Caller exceeded the requests-per-minute limit.                        |
+| `simulation_failed` | 400         | RPC simulation returned an error (contract trap, bad call, etc.).    |
+| `spec_unavailable`  | 404         | The contract's interface is not indexed yet, or is a Stellar Asset Contract (no callable spec). |
+| `internal_error`    | 500         | Unexpected server-side failure. Details are logged, not exposed.     |
+
 ## Public
 
 ### `GET /health`
@@ -61,6 +84,41 @@ Contracts seen, with `event_count`, `first_seen_ledger`, `last_seen_ledger`.
 Query: `limit` (1–1000, default 50), `offset`, `event_name` (e.g. `transfer`).
 Each row has raw base64 (`topics`, `value`) **and** decoded JSON
 (`decoded_topics`, `decoded_value`), plus `event_name`, `tx_hash`, `ledger`, …
+
+### `GET /events/:event_id`
+Fetch a **single** event by its unique `event_id`. Returns the full event row
+(raw XDR, decoded JSON, and enriched record); `404` if no event with that id is
+indexed. Useful for re-fetching an event whose `event_id` was received in a
+webhook delivery or other response.
+```json
+{
+  "event_id": "0015250934946869248-0000000000",
+  "contract_id": "CDLZFC3S...",
+  "ledger": 3550885,
+  "event_name": "transfer",
+  "decoded_topics": ["transfer", "G...", "G...", "native"],
+  "decoded_value": "100000000000",
+  "enriched": { "event": "transfer", "params": { "from": { "type": "Address", "value": "G..." }, "to": { "type": "Address", "value": "G..." }, "amount": { "type": "i128", "value": "100000000000" } } },
+  "tx_hash": "3664562a...",
+  "in_successful_call": true
+}
+```
+
+### `GET /transactions/:tx_hash/events`
+All indexed events emitted by a transaction, in the order they were emitted
+on-chain (`ledger ASC, event_id ASC`). Query: `limit` (1–1000, default 100).
+Returns `{ "tx_hash": "...", "count": N, "data": [...] }`. Useful for debugging
+"what did my transaction do?".
+```json
+{
+  "tx_hash": "3664562a...",
+  "count": 2,
+  "data": [
+    { "event_id": "...", "event_name": "transfer", "ledger": 3550885, "..." },
+    { "event_id": "...", "event_name": "mint",     "ledger": 3550885, "..." }
+  ]
+}
+```
 
 ### `GET /contracts/:id/transfers`
 Materialized SEP-41 transfers. Query: `limit`, `offset`, `from`, `to`.

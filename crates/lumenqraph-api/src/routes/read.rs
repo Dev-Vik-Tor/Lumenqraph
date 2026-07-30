@@ -88,7 +88,7 @@ pub async fn call_function(
             Ok(Json(response))
         }
         // A trap / bad call is the caller's problem, not a 500.
-        SimOutcome::Error(msg) => Err(ApiError::bad_request(format!("simulation failed: {msg}"))),
+        SimOutcome::Error(msg) => Err(ApiError::simulation_failed(format!("simulation failed: {msg}"))),
     }
 }
 
@@ -133,7 +133,7 @@ pub async fn simulate_call(
                 "simulated_at_ledger": latest_ledger,
             })))
         }
-        SimOutcome::Error(msg) => Err(ApiError::bad_request(format!("simulation failed: {msg}"))),
+        SimOutcome::Error(msg) => Err(ApiError::simulation_failed(format!("simulation failed: {msg}"))),
     }
 }
 
