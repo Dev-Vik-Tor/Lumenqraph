@@ -162,7 +162,7 @@ fn parse(hex_section: &str) -> ApiResult<CachedSpec> {
 }
 
 fn not_indexed() -> ApiError {
-    ApiError::not_found(
+    ApiError::spec_unavailable(
         "no interface indexed for this contract yet (the indexer fetches it \
          on first sighting; Stellar Asset Contracts have no callable spec)",
     )
@@ -304,7 +304,7 @@ mod tests {
             .await
             .err()
             .expect("should 404");
-        assert!(matches!(err, ApiError::Status(s, _) if s == axum::http::StatusCode::NOT_FOUND));
+        assert!(matches!(err, ApiError::Status(s, _, _) if s == axum::http::StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]
@@ -345,7 +345,7 @@ mod tests {
             .err()
             .expect("should 404");
         assert!(
-            matches!(missing, ApiError::Status(s, _) if s == axum::http::StatusCode::NOT_FOUND)
+            matches!(missing, ApiError::Status(s, _, _) if s == axum::http::StatusCode::NOT_FOUND)
         );
     }
 }

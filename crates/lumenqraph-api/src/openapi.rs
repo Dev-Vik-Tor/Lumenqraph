@@ -21,6 +21,20 @@ pub struct EventResponse {
     pub decoded_value: serde_json::Value,
 }
 
+/// A machine-readable error response.
+///
+/// The `code` field is stable and suitable for SDK branching. The `error`
+/// message is human-readable prose and may change between releases.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct ErrorResponse {
+    /// Stable machine-readable code. One of: `bad_request`, `unauthorized`,
+    /// `not_found`, `rate_limited`, `simulation_failed`, `spec_unavailable`,
+    /// `internal_error`.
+    pub code: String,
+    /// Human-readable description of the error. Do not parse this field.
+    pub error: String,
+}
+
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct TransferResponse {
     pub event_id: String,
@@ -117,6 +131,7 @@ impl OpenApiBuilder {
     components(
         schemas(
             EventResponse,
+            ErrorResponse,
             TransferResponse,
             ContractResponse,
             ContractInterfaceResponse,
@@ -133,6 +148,8 @@ impl OpenApiBuilder {
         list_contracts,
         get_contract_interface,
         list_contract_events,
+        get_event_by_id,
+        list_transaction_events,
         list_contract_transfers,
         get_contract_data,
         get_contract_data_history,
@@ -269,3 +286,30 @@ pub async fn create_webhook() {}
     tag = "Webhooks"
 )]
 pub async fn delete_webhook() {}
+
+#[utoipa::path(
+    get,
+    path = "/events/{event_id}",
+    params(("event_id" = String, Path, description = "Unique event id from RPC")),
+    responses(
+        (status = 200, description = "Full event row (raw XDR, decoded JSON, enriched)", body = EventResponse),
+        (status = 404, description = "Event not found", body = ErrorResponse)
+    ),
+    tag = "Events"
+)]
+pub async fn get_event_by_id() {}
+
+#[utoipa::path(
+    get,
+    path = "/transactions/{tx_hash}/events",
+    params(
+        ("tx_hash" = String, Path, description = "Transaction hash"),
+        ("limit" = Option<i64>, Query, description = "Max events to return (1-1000, default 100)")
+    ),
+    responses(
+        (status = 200, description = "All indexed events for the transaction, in emission order", body = Vec<EventResponse>),
+        (status = 404, description = "No events found for that transaction", body = ErrorResponse)
+    ),
+    tag = "Events"
+)]
+pub async fn list_transaction_events() {}

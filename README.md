@@ -50,6 +50,7 @@ Indexing Stellar **mainnet** right now. Below: the [Aquarius AMM](https://aqua.n
 - [Known limitations](#known-limitations)
 - [Troubleshooting & FAQ](docs/TROUBLESHOOTING.md)
 - [Explorer UI & Configuration](docs/EXPLORER.md)
+- [Migration Rollback Strategy](docs/MIGRATIONS.md)
 - [Security](SECURITY.md)
 - [Contributing](#contributing)
 - [License](#license)
@@ -219,6 +220,8 @@ Base URL defaults to `http://localhost:8080`. Full reference: [docs/API.md](docs
 | `POST` | `/contracts/:id/call` | Invoke a view function read-only and return a typed result. Body: `{ function, args, source_account? }`. |
 | `POST` | `/contracts/:id/simulate` | Dry-run any call; returns the typed result, the events it would emit, and its resource cost. Same body as `/call`. |
 | `GET` | `/contracts/:id/events` | Events for a contract. Query: `limit`, `offset`, `event_name`. |
+| `GET` | `/events/:event_id` | Fetch a single event by its unique id. `404` if not found. |
+| `GET` | `/transactions/:tx_hash/events` | All indexed events emitted by a transaction, in emission order. Query: `limit`. |
 | `GET` | `/contracts/:id/transfers` | Materialized token transfers. Query: `limit`, `offset`, `from`, `to`. |
 | `POST`/`GET` | `/graphql` | GraphQL endpoint (POST queries; GET serves the GraphiQL IDE). See [GraphQL](#graphql). |
 | `POST` | `/webhooks` | Create a subscription. |
