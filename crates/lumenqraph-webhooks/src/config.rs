@@ -12,6 +12,8 @@ pub struct Config {
     pub connect_timeout_secs: u64,
     pub total_timeout_secs: u64,
     pub max_concurrent_per_host: usize,
+    pub max_concurrent_deliveries: usize,
+    pub failure_threshold: i32,
 }
 
 impl Config {
@@ -24,6 +26,8 @@ impl Config {
             connect_timeout_secs: parse("WEBHOOK_CONNECT_TIMEOUT_SECS", 5),
             total_timeout_secs: parse("WEBHOOK_TOTAL_TIMEOUT_SECS", 10),
             max_concurrent_per_host: parse("WEBHOOK_MAX_CONCURRENT_PER_HOST", 5),
+            max_concurrent_deliveries: parse("WEBHOOK_MAX_CONCURRENT_DELIVERIES", 100),
+            failure_threshold: parse("WEBHOOK_FAILURE_THRESHOLD", 10),
         })
     }
 

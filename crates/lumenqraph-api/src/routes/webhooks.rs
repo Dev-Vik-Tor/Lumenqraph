@@ -2,7 +2,7 @@
 //! contract/event filters) and receive an HMAC-signing `secret` once, at
 //! creation. The `lumenqraph-webhooks` service does the actual delivery.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use lumenqraph_core::WebhookSubscription;
 use rand::RngCore;
@@ -84,7 +84,7 @@ pub async fn create_webhook(
     Ok(Json(sub))
 }
 
-/// (id, url, kind, contract_id, event_name, active, created_at)
+/// (id, url, kind, contract_id, event_name, active, created_at, auto_disabled_at, auto_disabled_reason)
 type WebhookListRow = (
     Uuid,
     String,
@@ -93,12 +93,14 @@ type WebhookListRow = (
     Option<String>,
     bool,
     chrono::DateTime<chrono::Utc>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<String>,
 );
 
 /// List subscriptions without exposing their secrets.
 pub async fn list_webhooks(State(state): State<AppState>) -> ApiResult<Json<Vec<Value>>> {
     let rows: Vec<WebhookListRow> = sqlx::query_as(
-        "SELECT id, url, kind, contract_id, event_name, active, created_at
+        "SELECT id, url, kind, contract_id, event_name, active, created_at, auto_disabled_at, auto_disabled_reason
              FROM webhook_subscriptions ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
@@ -107,7 +109,7 @@ pub async fn list_webhooks(State(state): State<AppState>) -> ApiResult<Json<Vec<
     let out = rows
         .into_iter()
         .map(
-            |(id, url, kind, contract_id, event_name, active, created_at)| {
+            |(id, url, kind, contract_id, event_name, active, created_at, auto_disabled_at, auto_disabled_reason)| {
                 json!({
                     "id": id,
                     "url": url,
@@ -116,6 +118,8 @@ pub async fn list_webhooks(State(state): State<AppState>) -> ApiResult<Json<Vec<
                     "event_name": event_name,
                     "active": active,
                     "created_at": created_at,
+                    "auto_disabled_at": auto_disabled_at,
+                    "auto_disabled_reason": auto_disabled_reason,
                 })
             },
         )
@@ -276,5 +280,77 @@ pub async fn list_webhook_deliveries(
             "failed": counts.1,
             "pending": counts.2,
         }
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct RedriveeQuery {
+    since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub async fn redrive_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<RedriveeQuery>,
+) -> ApiResult<Json<Value>> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM webhook_subscriptions WHERE id = $1)"
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    if !exists {
+        return Err(ApiError::not_found("subscription not found"));
+    }
+
+    let affected = if let Some(since) = query.since {
+        sqlx::query(
+            "UPDATE webhook_deliveries
+             SET status = 'pending', attempts = 0, next_attempt_at = now(), last_error = NULL
+             WHERE subscription_id = $1 AND status = 'failed' AND created_at >= $2"
+        )
+        .bind(id)
+        .bind(since)
+        .execute(&state.pool)
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query(
+            "UPDATE webhook_deliveries
+             SET status = 'pending', attempts = 0, next_attempt_at = now(), last_error = NULL
+             WHERE subscription_id = $1 AND status = 'failed'"
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await?
+        .rows_affected()
+    };
+
+    Ok(Json(json!({
+        "redriven": affected
+    })))
+}
+
+pub async fn reenable_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let affected = sqlx::query(
+        "UPDATE webhook_subscriptions
+         SET active = true, auto_disabled_at = NULL, auto_disabled_reason = NULL, consecutive_failures = 0
+         WHERE id = $1 AND auto_disabled_at IS NOT NULL"
+    )
+    .bind(id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::bad_request("subscription not found or not auto-disabled"));
+    }
+
+    Ok(Json(json!({
+        "reenabled": true
     })))
 }
