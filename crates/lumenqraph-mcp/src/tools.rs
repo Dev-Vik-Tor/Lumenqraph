@@ -2,11 +2,17 @@
 //! Postgres the API reads and the same read-layer encoder the API calls, so an
 //! agent gets typed, self-describing access to every indexed Soroban contract.
 
-use lumenqraph_core::{read, Contract, ContractSpec, EventRow};
+use lumenqraph_core::{read, Contract, ContractSpec, EventRow, SpecDiff, TokenTransfer};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use crate::rpc::SimOutcome;
 use crate::State;
+
+/// Cached spec for reuse across diff calculations.
+struct CachedSpec {
+    parsed: Option<Arc<ContractSpec>>,
+}
 
 /// JSON-Schema tool definitions returned by `tools/list`.
 pub fn definitions() -> Value {
@@ -101,6 +107,33 @@ pub fn definitions() -> Value {
                 },
                 "required": ["contract_id", "function"], "additionalProperties": false
             }
+        },
+        {
+            "name": "query_transfers",
+            "description": "Query materialized token transfers for a contract, newest first. Each transfer includes from/to addresses and amount. Optionally filter by sender or recipient address.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "contract_id": { "type": "string", "description": "Contract id (C...)" },
+                    "from": { "type": "string", "description": "Optional sender address filter" },
+                    "to": { "type": "string", "description": "Optional recipient address filter" },
+                    "limit": { "type": "integer", "description": "Max transfers (1-200, default 20)" }
+                },
+                "required": ["contract_id"], "additionalProperties": false
+            }
+        },
+        {
+            "name": "diff_contract_interface",
+            "description": "Compute what changed between any two versions of a contract's interface. Useful for understanding breaking changes between non-consecutive versions without assembling a chain of diffs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "contract_id": { "type": "string", "description": "Contract id (C...)" },
+                    "from": { "type": "integer", "description": "Starting version" },
+                    "to": { "type": "integer", "description": "Ending version" }
+                },
+                "required": ["contract_id", "from", "to"], "additionalProperties": false
+            }
         }
     ])
 }
@@ -164,6 +197,25 @@ pub async fn call(state: &State, name: &str, args: &Value) -> anyhow::Result<Val
                 args.get("args").cloned().unwrap_or(Value::Null),
                 args.get("source_account").and_then(Value::as_str),
                 true,
+            )
+            .await
+        }
+        "query_transfers" => {
+            query_transfers(
+                state,
+                str_arg(args, "contract_id")?,
+                args.get("from").and_then(Value::as_str),
+                args.get("to").and_then(Value::as_str),
+                args.get("limit").and_then(Value::as_i64),
+            )
+            .await
+        }
+        "diff_contract_interface" => {
+            diff_contract_interface(
+                state,
+                str_arg(args, "contract_id")?,
+                args.get("from").and_then(Value::as_i64),
+                args.get("to").and_then(Value::as_i64),
             )
             .await
         }
@@ -373,6 +425,93 @@ async fn query_events(
     .fetch_all(&state.pool)
     .await?;
     Ok(json!({ "contract_id": contract_id, "count": events.len(), "events": events }))
+}
+
+async fn query_transfers(
+    state: &State,
+    contract_id: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    limit: Option<i64>,
+) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
+    let limit = limit.unwrap_or(20).clamp(1, 200);
+    let transfers: Vec<TokenTransfer> = sqlx::query_as(
+        "SELECT event_id, contract_id, from_addr, to_addr, amount, kind, ledger, ledger_closed_at
+         FROM token_transfers
+         WHERE contract_id = $1
+           AND ($2::text IS NULL OR from_addr = $2)
+           AND ($3::text IS NULL OR to_addr = $3)
+         ORDER BY ledger DESC, event_id DESC
+         LIMIT $4",
+    )
+    .bind(contract_id)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(json!({
+        "contract_id": contract_id,
+        "count": transfers.len(),
+        "transfers": transfers,
+    }))
+}
+
+async fn diff_contract_interface(
+    state: &State,
+    contract_id: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> anyhow::Result<Value> {
+    validate_contract_id(contract_id)?;
+    let from = from.ok_or_else(|| anyhow::anyhow!("missing required argument 'from'"))?;
+    let to = to.ok_or_else(|| anyhow::anyhow!("missing required argument 'to'"))?;
+
+    if from < 1 || to < 1 {
+        anyhow::bail!("version numbers must be >= 1");
+    }
+    if from == to {
+        anyhow::bail!("`from` and `to` are the same version; nothing to diff");
+    }
+
+    let old_spec = load_spec_at_version(state, contract_id, from).await?;
+    let new_spec = load_spec_at_version(state, contract_id, to).await?;
+
+    let diff = SpecDiff::between(old_spec.as_ref(), new_spec.as_ref());
+
+    Ok(json!({
+        "contract_id": contract_id,
+        "from": from,
+        "to": to,
+        "diff": diff.to_json(),
+    }))
+}
+
+async fn load_spec_at_version(
+    state: &State,
+    contract_id: &str,
+    version: i64,
+) -> anyhow::Result<Arc<ContractSpec>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT spec_section FROM contract_spec_versions
+         WHERE contract_id = $1 AND version = $2",
+    )
+    .bind(contract_id)
+    .bind(version)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let hex_section = row
+        .map(|r| r.0)
+        .ok_or_else(|| anyhow::anyhow!("no version {version} recorded for this contract"))?;
+
+    if hex_section.is_empty() {
+        anyhow::bail!("spec section for version {version} is empty");
+    }
+
+    let section = hex::decode(&hex_section)?;
+    Ok(Arc::new(ContractSpec::from_spec_xdr(&section)))
 }
 
 /// Backs both `call_contract` (view read) and `simulate_call` (full preview).

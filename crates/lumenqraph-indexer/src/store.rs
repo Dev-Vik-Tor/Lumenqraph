@@ -128,16 +128,17 @@ pub async fn insert_events(pool: &PgPool, events: &[NewEvent]) -> anyhow::Result
             let t_to_addrs: Vec<Option<String>> =
                 transfers.iter().map(|t| t.to_addr.clone()).collect();
             let t_amounts: Vec<String> = transfers.iter().map(|t| t.amount.clone()).collect();
+            let t_kinds: Vec<String> = transfers.iter().map(|t| t.kind.clone()).collect();
             let t_ledgers: Vec<i64> = transfers.iter().map(|t| t.ledger).collect();
             let t_closed_ats: Vec<chrono::DateTime<chrono::Utc>> =
                 transfers.iter().map(|t| t.ledger_closed_at).collect();
 
             sqlx::query(
                 "INSERT INTO token_transfers
-                    (event_id, contract_id, from_addr, to_addr, amount, ledger, ledger_closed_at)
+                    (event_id, contract_id, from_addr, to_addr, amount, kind, ledger, ledger_closed_at)
                  SELECT * FROM UNNEST(
-                    $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[], $7::timestamptz[]
-                 ) AS t(event_id, contract_id, from_addr, to_addr, amount, ledger, ledger_closed_at)
+                    $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::bigint[], $8::timestamptz[]
+                 ) AS t(event_id, contract_id, from_addr, to_addr, amount, kind, ledger, ledger_closed_at)
                  ON CONFLICT (event_id) DO NOTHING",
             )
             .bind(&t_event_ids)
@@ -145,6 +146,7 @@ pub async fn insert_events(pool: &PgPool, events: &[NewEvent]) -> anyhow::Result
             .bind(&t_from_addrs)
             .bind(&t_to_addrs)
             .bind(&t_amounts)
+            .bind(&t_kinds)
             .bind(&t_ledgers)
             .bind(&t_closed_ats)
             .execute(&mut *tx)
@@ -210,8 +212,8 @@ pub async fn upsert_events(
             if let Some(t) = extract_transfer(e) {
                 let _ = sqlx::query(
                     "INSERT INTO token_transfers
-                        (event_id, contract_id, from_addr, to_addr, amount, ledger, ledger_closed_at)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        (event_id, contract_id, from_addr, to_addr, amount, kind, ledger, ledger_closed_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                      ON CONFLICT (event_id) DO NOTHING",
                 )
                 .bind(&t.event_id)
@@ -219,6 +221,7 @@ pub async fn upsert_events(
                 .bind(&t.from_addr)
                 .bind(&t.to_addr)
                 .bind(&t.amount)
+                .bind(&t.kind)
                 .bind(t.ledger)
                 .bind(t.ledger_closed_at)
                 .execute(&mut *tx)
@@ -240,31 +243,53 @@ struct Transfer {
     from_addr: Option<String>,
     to_addr: Option<String>,
     amount: String,
+    kind: String,
     ledger: i64,
     ledger_closed_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Recognise a SEP-41 style transfer event and pull out from/to/amount.
-/// Topics: [symbol "transfer", from Address, to Address, (optional asset)].
-/// Value: i128 amount (decoded as a decimal string).
+/// Recognize SEP-41 style balance-delta events: transfer, mint, burn, clawback.
+/// Returns None for other event types.
+///
+/// transfer: Topics: [symbol "transfer", from Address, to Address]
+/// mint: Topics: [symbol "mint", to Address]
+/// burn: Topics: [symbol "burn", from Address]
+/// clawback: Topics: [symbol "clawback", from Address]
+/// All have Value: i128 amount (decoded as a decimal string).
 fn extract_transfer(e: &NewEvent) -> Option<Transfer> {
-    if e.event_name.as_deref() != Some("transfer") {
-        return None;
-    }
+    let event_name = e.event_name.as_deref()?;
+    let kind = match event_name {
+        "transfer" => "transfer",
+        "mint" => "mint",
+        "burn" => "burn",
+        "clawback" => "clawback",
+        _ => return None,
+    };
+
     let as_addr = |v: Option<&Value>| match v {
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
     };
+
     let amount = match &e.decoded_value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
+
+    let (from_addr, to_addr) = match kind {
+        "transfer" => (as_addr(e.decoded_topics.get(1)), as_addr(e.decoded_topics.get(2))),
+        "mint" => (None, as_addr(e.decoded_topics.get(1))),
+        "burn" | "clawback" => (as_addr(e.decoded_topics.get(1)), None),
+        _ => return None,
+    };
+
     Some(Transfer {
         event_id: e.event_id.clone(),
         contract_id: e.contract_id.clone(),
-        from_addr: as_addr(e.decoded_topics.get(1)),
-        to_addr: as_addr(e.decoded_topics.get(2)),
+        from_addr,
+        to_addr,
         amount,
+        kind: kind.to_string(),
         ledger: e.ledger,
         ledger_closed_at: e.ledger_closed_at,
     })
@@ -305,18 +330,59 @@ mod tests {
         assert_eq!(t.from_addr.as_deref(), Some("GFROM"));
         assert_eq!(t.to_addr.as_deref(), Some("GTO"));
         assert_eq!(t.amount, "300");
-        assert_eq!(t.event_id, "e1");
+        assert_eq!(t.kind, "transfer");
     }
 
     #[test]
-    fn ignores_non_transfer_events() {
-        let e = event(Some("mint"), vec![json!("mint")], json!("1"));
+    fn extracts_mint_event() {
+        let e = event(
+            Some("mint"),
+            vec![json!("mint"), json!("GRECIPIENT")],
+            json!("1000"),
+        );
+        let t = extract_transfer(&e).expect("mint should be recognised");
+        assert_eq!(t.from_addr, None);
+        assert_eq!(t.to_addr.as_deref(), Some("GRECIPIENT"));
+        assert_eq!(t.amount, "1000");
+        assert_eq!(t.kind, "mint");
+    }
+
+    #[test]
+    fn extracts_burn_event() {
+        let e = event(
+            Some("burn"),
+            vec![json!("burn"), json!("GBURNER")],
+            json!("500"),
+        );
+        let t = extract_transfer(&e).expect("burn should be recognised");
+        assert_eq!(t.from_addr.as_deref(), Some("GBURNER"));
+        assert_eq!(t.to_addr, None);
+        assert_eq!(t.amount, "500");
+        assert_eq!(t.kind, "burn");
+    }
+
+    #[test]
+    fn extracts_clawback_event() {
+        let e = event(
+            Some("clawback"),
+            vec![json!("clawback"), json!("GVICTIM")],
+            json!("750"),
+        );
+        let t = extract_transfer(&e).expect("clawback should be recognised");
+        assert_eq!(t.from_addr.as_deref(), Some("GVICTIM"));
+        assert_eq!(t.to_addr, None);
+        assert_eq!(t.amount, "750");
+        assert_eq!(t.kind, "clawback");
+    }
+
+    #[test]
+    fn ignores_other_events() {
+        let e = event(Some("approval"), vec![json!("approval")], json!("1"));
         assert!(extract_transfer(&e).is_none());
     }
 
     #[test]
     fn non_string_amount_is_stringified() {
-        // Small amounts decode to a JSON number rather than a string.
         let e = event(
             Some("transfer"),
             vec![json!("transfer"), json!("GFROM"), json!("GTO")],
@@ -328,7 +394,6 @@ mod tests {
 
     #[test]
     fn missing_address_topics_are_none() {
-        // A malformed transfer with no address topics still projects, with NULLs.
         let e = event(Some("transfer"), vec![json!("transfer")], json!("5"));
         let t = extract_transfer(&e).unwrap();
         assert!(t.from_addr.is_none());

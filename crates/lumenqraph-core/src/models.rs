@@ -79,8 +79,13 @@ pub struct IndexerStatus {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A materialized token-transfer, derived from `transfer` events. Amounts are
-/// stored as decimal strings since i128 exceeds SQL numeric-in-i64 range.
+/// A materialized token-transfer or balance delta, derived from SEP-41 events.
+/// Amounts are stored as decimal strings since i128 exceeds SQL numeric-in-i64 range.
+/// The kind field distinguishes the event type:
+/// - 'transfer': peer-to-peer transfer (from/to addresses present)
+/// - 'mint': new tokens created (to address only)
+/// - 'burn': tokens destroyed (from address only)
+/// - 'clawback': administrative token seizure (from address only)
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TokenTransfer {
     pub event_id: String,
@@ -88,6 +93,7 @@ pub struct TokenTransfer {
     pub from_addr: Option<String>,
     pub to_addr: Option<String>,
     pub amount: String,
+    pub kind: String,
     pub ledger: i64,
     pub ledger_closed_at: DateTime<Utc>,
 }
