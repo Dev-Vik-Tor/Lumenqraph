@@ -54,7 +54,7 @@ jobs:
       # are run explicitly in the `--ignored` step below.
       TEST_DATABASE_URL: postgres://lumenqraph:lumenqraph@localhost:5432/lumenqraph
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -105,7 +105,7 @@ jobs:
       - name: Build (release)
         run: cargo build --workspace --release
 
-  # TypeScript SDK: typecheck, test (#81 #82 #83), and codegen drift check (#82)
+  # TypeScript SDK: build, typecheck, lint, test, and codegen drift check
   sdk-typescript:
     name: TypeScript SDK
     runs-on: ubuntu-latest
@@ -113,7 +113,7 @@ jobs:
       run:
         working-directory: sdk/typescript
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -123,16 +123,20 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: Lint
+        run: npm run lint
       - name: Test
         run: npm test
-      - name: Codegen drift check (#82)
+      - name: Codegen drift check
         run: npm run codegen:check
 
   security-audit:
     name: Security Audit (cargo-audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: rustsec/audit-check-action@v1
         with:
@@ -142,7 +146,7 @@ jobs:
     name: Supply Chain Security (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deny
         run: cargo install cargo-deny

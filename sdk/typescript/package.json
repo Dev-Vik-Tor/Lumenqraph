@@ -28,6 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
     "codegen": "openapi-typescript ../../openapi.yaml -o generated/api.d.ts",
@@ -42,8 +43,11 @@
     "lumenqraph"
   ],
   "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "eslint": "^9.20.0",
     "openapi-typescript": "^7.13.0",
     "typescript": "^5.4.0",
+    "typescript-eslint": "^8.24.0",
     "vitest": "^3.2.7"
   },
   "overrides": {
