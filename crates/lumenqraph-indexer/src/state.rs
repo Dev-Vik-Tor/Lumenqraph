@@ -78,6 +78,79 @@ async fn try_snapshot(
     Ok(())
 }
 
+/// Snapshot a batch of contract instances in a single `getLedgerEntries` call
+/// with bounded concurrency. State indexing and upgrade detection both use the
+/// instance entry, so this bundles both. Best-effort: errors are logged, never
+/// propagated to the poller. Contracts are processed with bounded concurrency
+/// to avoid overwhelming the RPC.
+pub async fn snapshot_instances_batch(
+    pool: &PgPool,
+    rpc: &RpcClient,
+    specs: &SpecCache,
+    contract_ids: &[String],
+) {
+    if contract_ids.is_empty() {
+        return;
+    }
+
+    // Chunk contract IDs for RPC calls (avoid sending too many at once).
+    const MAX_BATCH_INSTANCES: usize = 50;
+    for chunk in contract_ids.chunks(MAX_BATCH_INSTANCES) {
+        if let Err(e) = try_snapshot_instances_batch(pool, rpc, specs, chunk).await {
+            warn!(error = %e, "batch instance snapshot failed");
+        }
+    }
+}
+
+async fn try_snapshot_instances_batch(
+    pool: &PgPool,
+    rpc: &RpcClient,
+    specs: &SpecCache,
+    contract_ids: &[String],
+) -> anyhow::Result<()> {
+    let instances = rpc.get_contract_instances_batch(contract_ids).await?;
+
+    for (contract_id, instance_opt) in contract_ids.iter().zip(instances.iter()) {
+        let Some(instance) = instance_opt else {
+            continue;
+        };
+
+        // Reading the instance revealed the current executable — detect upgrades.
+        if let Some(hash) = &instance.wasm_hash {
+            specs.note_wasm_hash(pool, rpc, contract_id, hash).await;
+        }
+
+        // Change detection: the instance's lastModifiedLedgerSeq only advances when
+        // the instance (incl. its storage) actually changes.
+        let latest: Option<i64> =
+            sqlx::query_scalar("SELECT max(ledger) FROM contract_state WHERE contract_id = $1")
+                .bind(contract_id)
+                .fetch_one(pool)
+                .await?;
+        if latest == Some(instance.last_modified_ledger) {
+            continue;
+        }
+
+        let storage = decode_storage(&instance.storage);
+        sqlx::query(
+            "INSERT INTO contract_state (contract_id, ledger, storage)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (contract_id, ledger) DO NOTHING",
+        )
+        .bind(contract_id)
+        .bind(instance.last_modified_ledger)
+        .bind(storage)
+        .execute(pool)
+        .await?;
+        debug!(
+            contract_id,
+            ledger = instance.last_modified_ledger,
+            "state snapshot recorded"
+        );
+    }
+    Ok(())
+}
+
 /// Snapshot a single contract-data entry (one key/value pair, e.g. a holder's
 /// `Balance(Address)`) if it has changed since the last snapshot. Best-effort:
 /// errors are logged, never propagated to the poller. `label` is an optional

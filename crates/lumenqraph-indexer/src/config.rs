@@ -83,6 +83,16 @@ impl Config {
             .filter(|s| !s.is_empty())
             .collect();
 
+        // Validate CONTRACT_IDS as C-strkeys (Soroban contract addresses).
+        for id in &contract_ids {
+            if !lumenqraph_core::is_valid_contract_id(id) {
+                return Err(anyhow::anyhow!(
+                    "invalid CONTRACT_ID {}: expected a C… strkey (Soroban contract address)",
+                    id
+                ));
+            }
+        }
+
         // Parse numeric config with validation.
         let poll_interval_secs = env_parse("POLL_INTERVAL_SECS", 5)?;
         let page_size = env_parse("PAGE_SIZE", 1000)?;
@@ -126,6 +136,21 @@ impl Config {
 
         // Validate RPC_TIMEOUT_SECS minimum (must be at least 1s).
         let rpc_timeout_secs = clamp_with_warning("RPC_TIMEOUT_SECS", rpc_timeout_secs, 1, u64::MAX);
+
+        // Validate BALANCE_KEY_DURABILITY (must be "persistent" or "temporary").
+        let balance_key_durability = std::env::var("BALANCE_KEY_DURABILITY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "persistent".to_string());
+        match balance_key_durability.trim().to_lowercase().as_str() {
+            "persistent" | "temporary" => {}
+            invalid => {
+                return Err(anyhow::anyhow!(
+                    "invalid BALANCE_KEY_DURABILITY {}: expected \"persistent\" or \"temporary\"",
+                    invalid
+                ));
+            }
+        }
 
         // Parse key templates from JSON (KEY_TEMPLATES env var).
         // We deserialize into a plain intermediate struct and then convert to
@@ -178,10 +203,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "Balance".to_string()),
-            balance_key_durability: std::env::var("BALANCE_KEY_DURABILITY")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "persistent".to_string()),
+            balance_key_durability,
             retention_ledgers,
             reorg_overlap_ledgers,
             rpc_timeout_secs,
