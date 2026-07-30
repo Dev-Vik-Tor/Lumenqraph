@@ -54,7 +54,7 @@ pub async fn list_transfers(
         let page_config = pagination::PaginationConfig::new(limit, Some(cursor))
             .map_err(|e| ApiError::bad_request(format!("invalid cursor: {e}")))?;
         sqlx::query_as(
-            "SELECT event_id, contract_id, from_addr, to_addr, amount, ledger, ledger_closed_at
+            "SELECT event_id, contract_id, from_addr, to_addr, amount, kind, ledger, ledger_closed_at
              FROM token_transfers
              WHERE contract_id = $1
                AND ($2::text IS NULL OR from_addr = $2)
@@ -75,7 +75,7 @@ pub async fn list_transfers(
         // Backward compatibility: use offset pagination if no cursor provided
         let offset = q.offset.max(0);
         sqlx::query_as(
-            "SELECT event_id, contract_id, from_addr, to_addr, amount, ledger, ledger_closed_at
+            "SELECT event_id, contract_id, from_addr, to_addr, amount, kind, ledger, ledger_closed_at
              FROM token_transfers
              WHERE contract_id = $1
                AND ($2::text IS NULL OR from_addr = $2)

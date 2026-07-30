@@ -27,6 +27,18 @@ cargo deny check
 
 The `cargo audit` and `cargo deny check` commands verify dependency security and license compliance. These must pass in CI; running them locally catches issues before pushing.
 
+### Compile-time query checking
+
+The codebase uses sqlx's offline mode for compile-time verification of SQL queries. After modifying any SQL queries in the code:
+
+```bash
+cargo sqlx prepare --database-url "$DATABASE_URL"
+```
+
+This generates `.sqlx/` metadata that must be committed alongside your code changes. CI will verify that the metadata is up-to-date; stale metadata will fail the build.
+
+If you see "query not prepared" errors during build, run the command above with your database running (same as `docker compose up -d` in dev setup).
+
 ### Postgres-backed tests
 
 `cargo test --workspace` skips anything marked `#[ignore]`, which is every test
