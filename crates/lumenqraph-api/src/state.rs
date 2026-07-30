@@ -42,4 +42,12 @@ pub struct AppState {
     /// Short-lived read-through cache for `/call` (view-function) results.
     /// Keyed by (contract_id, function, args). Disabled when TTL is 0.
     pub call_cache: Arc<CallCache>,
+    /// Build information (version, git commit, timestamp).
+    pub build_info: Arc<BuildInfo>,
+}
+
+pub struct BuildInfo {
+    pub version: String,
+    pub commit: String,
+    pub build_time: String,
 }

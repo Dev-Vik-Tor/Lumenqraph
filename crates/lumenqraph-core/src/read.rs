@@ -1346,5 +1346,117 @@ mod tests {
                 })
             );
         }
+
+        /// Test that unsupported types return precise error messages.
+        fn unsupported_type_spec() -> Vec<u8> {
+            use stellar_xdr::curr::ScSpecUdtUnionCaseVoidV0;
+            // Specs with val, result, error, muxed_address args
+            let entries = vec![
+                ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+                    doc: "".try_into().unwrap(),
+                    name: "val_arg".try_into().unwrap(),
+                    inputs: vec![ScSpecFunctionInputV0 {
+                        doc: "".try_into().unwrap(),
+                        name: "v".try_into().unwrap(),
+                        type_: ScSpecTypeDef::Val,
+                    }]
+                    .try_into()
+                    .unwrap(),
+                    outputs: vec![].try_into().unwrap(),
+                }),
+                ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+                    doc: "".try_into().unwrap(),
+                    name: "result_arg".try_into().unwrap(),
+                    inputs: vec![ScSpecFunctionInputV0 {
+                        doc: "".try_into().unwrap(),
+                        name: "r".try_into().unwrap(),
+                        type_: ScSpecTypeDef::Result(Box::new(
+                            stellar_xdr::curr::ScSpecUdtResultV0 {
+                                ok_type: Box::new(ScSpecTypeDef::U32),
+                                error_type: Box::new(ScSpecTypeDef::U32),
+                            },
+                        )),
+                    }]
+                    .try_into()
+                    .unwrap(),
+                    outputs: vec![].try_into().unwrap(),
+                }),
+                ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+                    doc: "".try_into().unwrap(),
+                    name: "error_arg".try_into().unwrap(),
+                    inputs: vec![ScSpecFunctionInputV0 {
+                        doc: "".try_into().unwrap(),
+                        name: "e".try_into().unwrap(),
+                        type_: ScSpecTypeDef::Error,
+                    }]
+                    .try_into()
+                    .unwrap(),
+                    outputs: vec![].try_into().unwrap(),
+                }),
+                ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
+                    doc: "".try_into().unwrap(),
+                    name: "muxed_arg".try_into().unwrap(),
+                    inputs: vec![ScSpecFunctionInputV0 {
+                        doc: "".try_into().unwrap(),
+                        name: "m".try_into().unwrap(),
+                        type_: ScSpecTypeDef::MuxedAddress,
+                    }]
+                    .try_into()
+                    .unwrap(),
+                    outputs: vec![].try_into().unwrap(),
+                }),
+            ];
+            entries
+                .iter()
+                .flat_map(|e| e.to_xdr(Limits::none()).unwrap())
+                .collect()
+        }
+
+        fn unsupported_args_of(function: &str, args: Value) -> Result<Vec<ScVal>, EncodeError> {
+            let call = encode_call(&unsupported_type_spec(), C, function, &args, None)?;
+            let env = TransactionEnvelope::from_xdr_base64(&call.tx_xdr, Limits::none()).unwrap();
+            let TransactionEnvelope::Tx(v1) = env else {
+                panic!("expected v1 envelope")
+            };
+            let OperationBody::InvokeHostFunction(op) = &v1.tx.operations[0].body else {
+                panic!("expected invoke host function")
+            };
+            let HostFunction::InvokeContract(ic) = &op.host_function else {
+                panic!("expected invoke contract")
+            };
+            Ok(ic.args.to_vec())
+        }
+
+        #[test]
+        fn val_type_is_unsupported() {
+            let err = unsupported_args_of("val_arg", json!({"v": null})).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("Val"), "error should mention Val type: {msg}");
+            assert!(msg.contains("not yet supported"), "error should be clear: {msg}");
+        }
+
+        #[test]
+        fn result_type_is_unsupported() {
+            let err = unsupported_args_of("result_arg", json!({"r": null})).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("Result"), "error should mention Result type: {msg}");
+            assert!(msg.contains("not yet supported"), "error should be clear: {msg}");
+        }
+
+        #[test]
+        fn error_type_is_unsupported() {
+            let err = unsupported_args_of("error_arg", json!({"e": null})).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("Error"), "error should mention Error type: {msg}");
+            assert!(msg.contains("not yet supported"), "error should be clear: {msg}");
+        }
+
+        #[test]
+        fn muxed_address_type_is_unsupported() {
+            let err = unsupported_args_of("muxed_arg", json!({"m": null})).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("MuxedAddress"), "error should mention MuxedAddress type: {msg}");
+            assert!(msg.contains("not yet supported"), "error should be clear: {msg}");
+        }
     }
 }

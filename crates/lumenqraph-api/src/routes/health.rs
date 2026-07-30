@@ -37,6 +37,9 @@ pub async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "network": network,
             "network_passphrase": passphrase,
             "mounts": mounts,
+            "version": state.build_info.version,
+            "commit": state.build_info.commit,
+            "build_time": state.build_info.build_time,
         })));
     };
 
@@ -56,6 +59,9 @@ pub async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         "seconds_since_cursor_update": secs_since_update,
         "events_ingested_total": ingested,
         "errors_total": errors,
+        "version": state.build_info.version,
+        "commit": state.build_info.commit,
+        "build_time": state.build_info.build_time,
     })))
 }
 
