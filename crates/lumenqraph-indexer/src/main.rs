@@ -5,6 +5,7 @@
 //!   lumenqraph-indexer                    # live tail (default)
 //!   lumenqraph-indexer backfill [LEDGER]  # one-shot catch-up within RPC window (~7 days) then exit
 //!   lumenqraph-indexer deep-backfill [OPTIONS]  # gapless history from a data-lake export (#84)
+//!   lumenqraph-indexer reenrich          # re-enrich historical events with newly-available specs
 //!   lumenqraph-indexer inspect <CONTRACT> # print a contract's on-chain interface
 //!
 //! deep-backfill options:
@@ -20,6 +21,7 @@ mod cursor;
 mod deep_backfill;
 mod keys;
 mod poller;
+mod reenrich;
 mod retention;
 mod rpc_client;
 mod specs;
@@ -106,6 +108,20 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to run migrations")?;
 
+    if args.get(1).map(String::as_str) == Some("reenrich") {
+        info!("running in reenrich mode");
+        let result = reenrich::run_reenrich(pool.clone(), rpc).await;
+
+        // Release the advisory lock on exit.
+        info!("releasing indexer leader lock");
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(INDEXER_LOCK_ID)
+            .execute(&pool)
+            .await;
+
+        return result;
+    }
+
     if args.get(1).map(String::as_str) == Some("backfill") {
         let from = args
             .get(2)
@@ -113,14 +129,14 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(config.start_ledger);
         info!(from, "running in backfill mode");
         let result = backfill::run(pool.clone(), rpc, config, from).await;
-        
+
         // Release the advisory lock on exit.
         info!("releasing indexer leader lock");
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(INDEXER_LOCK_ID)
             .execute(&pool)
             .await;
-        
+
         return result;
     }
 

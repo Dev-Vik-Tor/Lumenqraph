@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use lumenqraph_core::{ContractSpec, SpecDiff};
 use sqlx::PgPool;
@@ -26,12 +27,33 @@ use tracing::{debug, info, warn};
 
 use crate::rpc_client::RpcClient;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
+enum CachedSpec {
+    Spec(Arc<ContractSpec>),
+    /// Permanent failure: no WASM spec (e.g. SAC). Never retry.
+    NoSpec,
+    /// Transient failure: RPC error. Retry after TTL expires.
+    FetchError { retried_at: Instant },
+}
+
+#[derive(Clone)]
 struct Cached {
-    spec: Option<Arc<ContractSpec>>,
+    spec: CachedSpec,
     /// The executable hash the cached spec was parsed from (`None` for SAC).
     wasm_hash: Option<String>,
 }
+
+impl Default for Cached {
+    fn default() -> Self {
+        Self {
+            spec: CachedSpec::NoSpec,
+            wasm_hash: None,
+        }
+    }
+}
+
+/// TTL for transient fetch errors before retrying.
+const FETCH_ERROR_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct SpecCache {
@@ -51,11 +73,14 @@ impl SpecCache {
             .lock()
             .unwrap()
             .get(contract_id)
-            .and_then(|c| c.spec.clone())
+            .and_then(|c| match &c.spec {
+                CachedSpec::Spec(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// The spec for a contract, fetching+parsing+persisting on first use.
-    /// Best-effort: any failure caches `None` and enrichment is simply skipped.
+    /// Distinguishes transient failures (retryable) from permanent failures (SAC).
     pub async fn get(
         &self,
         pool: &PgPool,
@@ -64,17 +89,39 @@ impl SpecCache {
     ) -> Option<Arc<ContractSpec>> {
         // Lock only to read/insert — never held across the network fetch.
         if let Some(cached) = self.inner.lock().unwrap().get(contract_id).cloned() {
-            return cached.spec;
+            match &cached.spec {
+                CachedSpec::Spec(s) => return Some(s.clone()),
+                CachedSpec::NoSpec => return None,
+                CachedSpec::FetchError { retried_at } => {
+                    if retried_at.elapsed() < FETCH_ERROR_TTL {
+                        return None;
+                    }
+                    // TTL expired; allow retry.
+                }
+            }
         }
-        let (spec, wasm_hash) = load(pool, rpc, contract_id).await;
+        let (spec, wasm_hash, is_permanent) = load(pool, rpc, contract_id).await;
+        let cached_spec = match spec {
+            Some(s) => CachedSpec::Spec(s.clone()),
+            None => {
+                if is_permanent {
+                    CachedSpec::NoSpec
+                } else {
+                    CachedSpec::FetchError { retried_at: Instant::now() }
+                }
+            }
+        };
         self.inner.lock().unwrap().insert(
             contract_id.to_string(),
             Cached {
-                spec: spec.clone(),
+                spec: cached_spec.clone(),
                 wasm_hash,
             },
         );
-        spec
+        match cached_spec {
+            CachedSpec::Spec(s) => Some(s),
+            _ => None,
+        }
     }
 
     /// Note the contract's *current* WASM hash (observed from its instance
@@ -111,7 +158,7 @@ impl SpecCache {
                 wasm_hash = current_hash,
                 "contract upgraded; re-reading interface"
             );
-            self.get(pool, rpc, contract_id).await;
+            let _ = self.get(pool, rpc, contract_id).await;
         }
     }
 }
@@ -142,13 +189,15 @@ pub async fn check_for_upgrade(
     }
 }
 
-/// Returns `(parsed spec, wasm hash)`. The hash is present for any WASM contract
+/// Returns `(parsed spec, wasm hash, is_permanent_failure)`. The hash is present for any WASM contract
 /// (even if its spec fails to parse) and `None` for a Stellar Asset Contract.
+/// `is_permanent_failure` is true when the failure is not retryable (SAC, parse error),
+/// and false for transient failures (RPC error).
 async fn load(
     pool: &PgPool,
     rpc: &RpcClient,
     contract_id: &str,
-) -> (Option<Arc<ContractSpec>>, Option<String>) {
+) -> (Option<Arc<ContractSpec>>, Option<String>, bool) {
     let (wasm_hash, wasm) = match rpc.get_contract_wasm(contract_id).await {
         Ok(Some(w)) => w,
         Ok(None) => {
@@ -156,16 +205,19 @@ async fn load(
                 contract_id,
                 "contract has no WASM spec (e.g. SAC); skipping"
             );
-            return (None, None);
+            // Permanent: RPC succeeded but returned no WASM (SAC).
+            return (None, None, true);
         }
         Err(e) => {
             warn!(contract_id, error = %e, "failed to fetch contract WASM");
-            return (None, None);
+            // Transient: RPC error; should retry.
+            return (None, None, false);
         }
     };
 
     let Some(spec) = ContractSpec::from_wasm(&wasm) else {
-        return (None, Some(wasm_hash));
+        // Permanent: WASM exists but spec parsing failed.
+        return (None, Some(wasm_hash), true);
     };
     // The raw section (hex) lets the read layer re-parse exact argument types.
     let spec_section = lumenqraph_core::spec::spec_section_of(&wasm)
@@ -185,7 +237,7 @@ async fn load(
     if let Err(e) = record_version(pool, contract_id, &wasm_hash, &spec_section, &spec).await {
         warn!(contract_id, error = %e, "failed to record contract spec version");
     }
-    (Some(Arc::new(spec)), Some(wasm_hash))
+    (Some(Arc::new(spec)), Some(wasm_hash), true)
 }
 
 /// Append this interface to the contract's version history, unless it's the

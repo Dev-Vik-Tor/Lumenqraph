@@ -260,17 +260,20 @@ pub async fn fetch_and_store(
     // storage map and the executable hash respectively — so whenever state
     // indexing is on it covers both, and the upgrade watch adds no RPC calls.
     if config.state_indexing || config.upgrade_watch {
-        let targets: Vec<&String> = if config.contract_ids.is_empty() {
-            active_contracts.iter().collect()
+        let targets: Vec<String> = if config.contract_ids.is_empty() {
+            active_contracts.iter().cloned().collect()
         } else {
-            config.contract_ids.iter().collect()
+            config.contract_ids.clone()
         };
-        for contract_id in targets {
-            if config.state_indexing {
-                // Change-detected, so unchanged instances are no-op writes.
-                // Also notes the executable hash, detecting upgrades for free.
-                state::snapshot(pool, rpc, specs, contract_id).await;
-            } else {
+        if config.state_indexing {
+            // Batch instance reads with bounded concurrency.
+            // Change-detected, so unchanged instances are no-op writes.
+            // Also notes the executable hash, detecting upgrades for free.
+            state::snapshot_instances_batch(pool, rpc, specs, &targets).await;
+        } else {
+            // Upgrade watch in index-all mode: batch the instance reads,
+            // then check for upgrades.
+            for contract_id in &targets {
                 specs::check_for_upgrade(pool, rpc, specs, contract_id).await;
             }
         }

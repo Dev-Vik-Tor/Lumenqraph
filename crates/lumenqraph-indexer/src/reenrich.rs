@@ -1,0 +1,106 @@
+//! Re-enrich historical events that were indexed before their contract's spec
+//! was available. For events where enriched IS NULL AND event_name IS NOT NULL,
+//! look up the (now-cached) spec and backfill enriched.
+//!
+//! This is a one-shot backfill pass that can be run manually or automatically
+//! when a spec is first successfully fetched for a contract with stored events.
+
+use lumenqraph_core::NewEvent;
+use sqlx::{PgPool, Row};
+use tracing::{debug, info, warn};
+
+use crate::convert::to_new_event;
+use crate::rpc_client::RpcClient;
+use crate::specs::SpecCache;
+
+/// Run a complete re-enrichment pass: find all events where enriched IS NULL
+/// AND event_name IS NOT NULL, re-enrich them against the (now-cached) spec,
+/// and update the database.
+pub async fn run_reenrich(pool: PgPool, rpc: RpcClient) -> anyhow::Result<()> {
+    let specs = SpecCache::new();
+    let mut processed = 0u64;
+    let mut updated = 0u64;
+
+    // Fetch events in batches to avoid loading the entire table into memory.
+    const BATCH_SIZE: i32 = 1000;
+    let mut offset = 0i32;
+
+    loop {
+        let rows = sqlx::query(
+            "SELECT event_id, contract_id, decoded_topics, event_name, decoded_value
+             FROM events
+             WHERE enriched IS NULL AND event_name IS NOT NULL
+             ORDER BY ledger, paging_token
+             LIMIT $1 OFFSET $2",
+        )
+        .bind(BATCH_SIZE)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        for row in rows {
+            let event_id: String = row.get("event_id");
+            let contract_id: String = row.get("contract_id");
+            let decoded_topics_json: String = row.get("decoded_topics");
+            let event_name: String = row.get("event_name");
+            let decoded_value_json: String = row.get("decoded_value");
+
+            processed += 1;
+
+            // Re-parse the decoded data for enrichment.
+            let decoded_topics: Vec<serde_json::Value> =
+                match serde_json::from_str(&decoded_topics_json) {
+                    Ok(dt) => dt,
+                    Err(e) => {
+                        warn!(event_id, error = %e, "failed to parse decoded_topics");
+                        continue;
+                    }
+                };
+
+            let decoded_value: serde_json::Value = match serde_json::from_str(&decoded_value_json) {
+                Ok(dv) => dv,
+                Err(e) => {
+                    warn!(event_id, error = %e, "failed to parse decoded_value");
+                    continue;
+                }
+            };
+
+            // Fetch the spec for this contract (cached after first fetch).
+            let spec = specs.get(&pool, &rpc, &contract_id).await;
+
+            // Try to enrich against the spec.
+            let enriched = if let Some(spec_ref) = spec.as_deref() {
+                spec_ref.enrich_event(&event_name, &decoded_topics, &decoded_value)
+            } else {
+                None
+            };
+
+            // Update the database if we got an enrichment.
+            if let Some(enriched_json) = enriched {
+                let enriched_str = serde_json::to_string(&enriched_json)
+                    .unwrap_or_else(|_| "null".to_string());
+                if let Err(e) = sqlx::query("UPDATE events SET enriched = $1 WHERE event_id = $2")
+                    .bind(&enriched_str)
+                    .bind(&event_id)
+                    .execute(&pool)
+                    .await
+                {
+                    warn!(event_id, error = %e, "failed to update enriched field");
+                } else {
+                    updated += 1;
+                }
+            } else {
+                debug!(event_id, contract_id, event_name, "no enrichment available");
+            }
+        }
+
+        offset += BATCH_SIZE;
+    }
+
+    info!(processed, updated, "re-enrichment pass complete");
+    Ok(())
+}

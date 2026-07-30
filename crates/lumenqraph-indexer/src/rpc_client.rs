@@ -384,6 +384,74 @@ impl RpcClient {
         }))
     }
 
+    /// Fetch a batch of contract instance entries in a single `getLedgerEntries` call.
+    /// The returned `Vec` is positionally aligned with `contract_ids`: `None` means the
+    /// instance entry was absent. Callers should chunk large slices to avoid RPC limits.
+    pub async fn get_contract_instances_batch(
+        &self,
+        contract_ids: &[String],
+    ) -> anyhow::Result<Vec<Option<InstanceEntry>>> {
+        if contract_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Encode all instance keys.
+        let mut keys_with_idx: Vec<(String, usize)> = Vec::with_capacity(contract_ids.len());
+        for (idx, contract_id) in contract_ids.iter().enumerate() {
+            let addr = ScAddress::from_str(contract_id)
+                .with_context(|| format!("invalid contract id {contract_id}"))?;
+            let key = LedgerKey::ContractData(LedgerKeyContractData {
+                contract: addr,
+                key: ScVal::LedgerKeyContractInstance,
+                durability: ContractDataDurability::Persistent,
+            });
+            let key_b64 = key.to_xdr_base64(Limits::none()).context("encode ledger key")?;
+            keys_with_idx.push((key_b64, idx));
+        }
+
+        // Extract just the keys for the RPC call.
+        let keys: Vec<String> = keys_with_idx.iter().map(|(k, _)| k.clone()).collect();
+
+        let result: LedgerEntriesResult = self
+            .call("getLedgerEntries", serde_json::json!({ "keys": keys }))
+            .await?;
+
+        let mut output = vec![None; contract_ids.len()];
+        for item in result.entries.unwrap_or_default() {
+            let data = match LedgerEntryData::from_xdr_base64(&item.xdr, Limits::none()) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let LedgerEntryData::ContractData(cd) = data else {
+                continue;
+            };
+            let ScVal::ContractInstance(inst) = cd.val else {
+                continue;
+            };
+
+            // Determine which contract this is by reconstructing the key.
+            let entry_key = LedgerKey::ContractData(LedgerKeyContractData {
+                contract: cd.contract.clone(),
+                key: cd.key,
+                durability: cd.durability,
+            });
+            if let Ok(key_b64) = entry_key.to_xdr_base64(Limits::none()) {
+                if let Some((_, idx)) = keys_with_idx.iter().find(|(k, _)| k == &key_b64) {
+                    let wasm_hash = match inst.executable {
+                        ContractExecutable::Wasm(h) => Some(hex::encode(h.0)),
+                        ContractExecutable::StellarAsset => None,
+                    };
+                    output[*idx] = Some(InstanceEntry {
+                        wasm_hash,
+                        storage: ScVal::Map(inst.storage),
+                        last_modified_ledger: item.last_modified_ledger_seq,
+                    });
+                }
+            }
+        }
+        Ok(output)
+    }
+
     /// Fetch a single contract-data entry by its exact storage `key` and
     /// `durability`. Unlike instance storage, these per-key entries aren't
     /// enumerable, so the caller must know the key (e.g. a `Balance(Address)`).
