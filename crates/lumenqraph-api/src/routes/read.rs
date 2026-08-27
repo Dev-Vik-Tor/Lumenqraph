@@ -226,6 +226,9 @@ mod tests {
             },
         );
 
+        use crate::concurrency_limit::ConcurrencyLimiter;
+        use crate::call_cache::CallCache;
+
         AppState {
             pool,
             require_auth: false,
@@ -239,6 +242,15 @@ mod tests {
             rpc_limiter: Arc::new(RateLimiter::new()),
             rpc_require_auth: false,
             rpc_anon_rate_limit: 1_000_000,
+            metrics: Arc::new(crate::metrics_middleware::MetricsCollector::new()),
+            call_cache: Arc::new(CallCache::new(100, 5)),
+            build_info: Arc::new(crate::state::BuildInfo {
+                version: "test".to_string(),
+                commit: "test".to_string(),
+                build_time: "test".to_string(),
+            }),
+            concurrency_limiter: Arc::new(ConcurrencyLimiter::new()),
+            max_concurrent_per_ip: 100,
         }
     }
 

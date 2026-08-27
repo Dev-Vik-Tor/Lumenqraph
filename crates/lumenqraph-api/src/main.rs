@@ -4,6 +4,7 @@
 
 mod auth;
 mod call_cache;
+mod concurrency_limit;
 mod error;
 mod graphql;
 mod metrics;
@@ -33,6 +34,7 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use call_cache::CallCache;
+use concurrency_limit::ConcurrencyLimiter;
 use rate_limit::RateLimiter;
 use state::{AppState, BuildInfo};
 
@@ -174,6 +176,8 @@ async fn main() -> anyhow::Result<()> {
         metrics: Arc::new(metrics_middleware::MetricsCollector::new()),
         call_cache,
         build_info,
+        concurrency_limiter: Arc::new(ConcurrencyLimiter::new()),
+        max_concurrent_per_ip: env_parse("MAX_CONCURRENT_PER_IP", 100),
     };
 
     let cors_layer = build_cors_layer();

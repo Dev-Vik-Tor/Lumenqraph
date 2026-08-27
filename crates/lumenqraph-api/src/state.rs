@@ -6,6 +6,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::call_cache::CallCache;
+use crate::concurrency_limit::ConcurrencyLimiter;
 use crate::metrics_middleware::MetricsCollector;
 use crate::rate_limit::RateLimiter;
 use crate::rpc::RpcClient;
@@ -44,6 +45,10 @@ pub struct AppState {
     pub call_cache: Arc<CallCache>,
     /// Build information (version, git commit, timestamp).
     pub build_info: Arc<BuildInfo>,
+    /// Per-IP concurrency limiter to prevent slowloris attacks.
+    pub concurrency_limiter: Arc<ConcurrencyLimiter>,
+    /// Max concurrent requests per IP. 0 means unlimited.
+    pub max_concurrent_per_ip: usize,
 }
 
 pub struct BuildInfo {
