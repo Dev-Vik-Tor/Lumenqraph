@@ -318,6 +318,7 @@ mod integration_tests {
         use crate::concurrency_limit::ConcurrencyLimiter;
         use crate::metrics_middleware::MetricsCollector;
         use crate::call_cache::CallCache;
+        use crate::read_cost_limit::ReadCostLimitConfig;
 
         AppState {
             pool,
@@ -340,6 +341,7 @@ mod integration_tests {
             }),
             concurrency_limiter: Arc::new(ConcurrencyLimiter::new()),
             max_concurrent_per_ip: 100,
+            read_cost_limit_config: ReadCostLimitConfig::default(),
         }
     }
 

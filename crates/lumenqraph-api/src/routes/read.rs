@@ -10,12 +10,14 @@
 //! index time), so calls are type-checked before they ever hit the network.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::Json;
 use lumenqraph_core::read::{self, EncodeError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::{ApiError, ApiResult};
+use crate::read_cost_limit::validate_call_request;
 use crate::rpc::SimOutcome;
 use crate::state::AppState;
 
@@ -53,6 +55,20 @@ pub async fn call_function(
 ) -> ApiResult<Json<Value>> {
     if !lumenqraph_core::is_valid_contract_id(&contract_id) {
         return Err(ApiError::bad_request("invalid contract id"));
+    }
+
+    // Estimate request body size (function name + args serialization)
+    let estimated_body_size = req.function.len() + serde_json::to_string(&req.args)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Validate request cost before hitting RPC
+    if let Err(e) = validate_call_request(estimated_body_size, &req.args, &state.read_cost_limit_config) {
+        return Err(ApiError::Status(
+            e.http_status(),
+            crate::error::ErrorCode::BadRequest,
+            e.message(),
+        ));
     }
 
     // Check the read-through cache before hitting RPC.
@@ -104,6 +120,21 @@ pub async fn simulate_call(
     if !lumenqraph_core::is_valid_contract_id(&contract_id) {
         return Err(ApiError::bad_request("invalid contract id"));
     }
+
+    // Estimate request body size (function name + args serialization)
+    let estimated_body_size = req.function.len() + serde_json::to_string(&req.args)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Validate request cost before hitting RPC
+    if let Err(e) = validate_call_request(estimated_body_size, &req.args, &state.read_cost_limit_config) {
+        return Err(ApiError::Status(
+            e.http_status(),
+            crate::error::ErrorCode::BadRequest,
+            e.message(),
+        ));
+    }
+
     let spec = state.specs.current(&state.pool, &contract_id).await?;
 
     let call = read::encode_call(
@@ -228,6 +259,7 @@ mod tests {
 
         use crate::concurrency_limit::ConcurrencyLimiter;
         use crate::call_cache::CallCache;
+        use crate::read_cost_limit::ReadCostLimitConfig;
 
         AppState {
             pool,
@@ -251,6 +283,7 @@ mod tests {
             }),
             concurrency_limiter: Arc::new(ConcurrencyLimiter::new()),
             max_concurrent_per_ip: 100,
+            read_cost_limit_config: ReadCostLimitConfig::default(),
         }
     }
 

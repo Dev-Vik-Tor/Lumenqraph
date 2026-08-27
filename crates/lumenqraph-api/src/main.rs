@@ -12,6 +12,7 @@ mod metrics_middleware;
 mod openapi;
 mod pagination;
 mod rate_limit;
+mod read_cost_limit;
 mod request_id;
 mod routes;
 mod rpc;
@@ -36,6 +37,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use call_cache::CallCache;
 use concurrency_limit::ConcurrencyLimiter;
 use rate_limit::RateLimiter;
+use read_cost_limit::ReadCostLimitConfig;
 use state::{AppState, BuildInfo};
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -178,6 +180,10 @@ async fn main() -> anyhow::Result<()> {
         build_info,
         concurrency_limiter: Arc::new(ConcurrencyLimiter::new()),
         max_concurrent_per_ip: env_parse("MAX_CONCURRENT_PER_IP", 100),
+        read_cost_limit_config: ReadCostLimitConfig {
+            max_request_size: env_parse("READ_MAX_REQUEST_SIZE", 256 * 1024),
+            max_args_size: env_parse("READ_MAX_ARGS_SIZE", 128 * 1024),
+        },
     };
 
     let cors_layer = build_cors_layer();

@@ -9,6 +9,7 @@ use crate::call_cache::CallCache;
 use crate::concurrency_limit::ConcurrencyLimiter;
 use crate::metrics_middleware::MetricsCollector;
 use crate::rate_limit::RateLimiter;
+use crate::read_cost_limit::ReadCostLimitConfig;
 use crate::rpc::RpcClient;
 use crate::specs::SpecCache;
 
@@ -49,6 +50,8 @@ pub struct AppState {
     pub concurrency_limiter: Arc<ConcurrencyLimiter>,
     /// Max concurrent requests per IP. 0 means unlimited.
     pub max_concurrent_per_ip: usize,
+    /// Cost limiting config for read routes (/call, /simulate).
+    pub read_cost_limit_config: ReadCostLimitConfig,
 }
 
 pub struct BuildInfo {
