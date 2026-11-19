@@ -519,6 +519,35 @@ jobs:
         run: npm test
 
   # Validate Grafana dashboard metrics against metrics defined in Rust code
+  # Issue #642: the sample Prometheus config must scrape every service that
+  # exposes metrics, and every alert expression must reference a metric that a
+  # scraped service emits. promtool checks run in a pinned Prometheus image.
+  monitoring-config:
+    name: Monitoring Config (promtool, alert metrics)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: pip install pyyaml
+      - name: Check every alert metric is emitted by a scraped service
+        run: python3 scripts/check_alert_metrics.py
+      - name: promtool check config
+        run: |
+          docker run --rm -v "$PWD/monitoring:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v2.54.1 \
+            check config /etc/prometheus/prometheus.yml
+      - name: promtool check rules
+        run: |
+          docker run --rm -v "$PWD/monitoring:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v2.54.1 \
+            check rules /etc/prometheus/prometheus_alerts.yml
+
   dashboard-metrics:
     name: Dashboard Metrics Validation
     runs-on: ubuntu-latest
