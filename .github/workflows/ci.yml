@@ -121,7 +121,6 @@ jobs:
             echo "::error::No migrations were recorded on the fresh database."
             exit 1
           fi
-=======
 
   # Issue #475: lint new or changed migrations with squawk so table-locking
   # DDL (non-concurrent index builds, constraints without NOT VALID, column
@@ -369,6 +368,19 @@ jobs:
   # `python -m build` produces an sdist and a wheel from sdk/python, and
   # `twine check` verifies the package metadata (including the LICENSE file
   # referenced by pyproject.toml) is valid for upload.
+  # Issue #641: the webhook verification examples in docs/WEBHOOKS.md must
+  # verify the committed cross-language test vector (Node, Python, Go), and the
+  # snippets in the doc must match the tested source files.
+  webhook-examples:
+    name: Webhook Verification Examples (Node, Python, Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Run webhook example suites and doc snippet checks
+        run: python3 scripts/check_webhook_examples.py
+
   python-sdk-build:
     name: Python SDK Build (3.12)
     runs-on: ubuntu-latest

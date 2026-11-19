@@ -241,6 +241,36 @@ mod tests {
         );
     }
 
+    /// The committed cross-language vector, shared with the Node, Python and Go
+    /// examples in `docs/examples/webhooks` (all checked in CI).
+    #[test]
+    fn verifies_committed_cross_language_vector() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/examples/webhooks/test_vector.json"
+        ))
+        .unwrap();
+        let secret = vector["secret"].as_str().unwrap();
+        let header = vector["header"].as_str().unwrap();
+        let body = vector["body"].as_str().unwrap().as_bytes();
+
+        // The vector's timestamp is fixed in the past, so widen the tolerance
+        // to keep this test independent of the wall clock.
+        let wide = Duration::from_secs(i64::MAX as u64);
+        assert_eq!(verify_webhook(secret, header, body, wide), Ok(()));
+
+        let mut tampered = body.to_vec();
+        tampered.push(b' ');
+        assert_eq!(
+            verify_webhook(secret, header, &tampered, wide),
+            Err(VerifyError::Mismatch)
+        );
+        // With the default 300s tolerance the 2023 vector is stale.
+        assert_eq!(
+            verify_webhook(secret, header, body, Duration::from_secs(300)),
+            Err(VerifyError::StaleTimestamp)
+        );
+    }
+
     #[test]
     fn test_verify_secret_equal_matches() {
         assert!(verify_secret_equal("s3cret-token", "s3cret-token"));
