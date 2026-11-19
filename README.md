@@ -306,7 +306,10 @@ Generate an API key:
 
 ```bash
 DATABASE_URL=... ./scripts/gen_api_key.sh myapp pro 600   # name, tier, requests/min
+DATABASE_URL=... ./scripts/gen_api_key.sh myapp pro 600 --scopes read,rpc --expires-in 90d
 ```
+
+Scopes are `read`, `rpc`, `webhooks:write` and `admin` (default `read`). `--expires-in` takes `Nd` or `Nh` (default: never expires). The script prints a key prefix to record in audit logs.
 
 ## Typed, self-describing decoding
 
