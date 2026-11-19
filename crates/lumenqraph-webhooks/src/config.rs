@@ -57,19 +57,8 @@ impl std::fmt::Debug for Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let encryption_key = std::env::var("WEBHOOK_ENCRYPTION_KEY")
-            .map_err(|_| anyhow::anyhow!(
-                "WEBHOOK_ENCRYPTION_KEY must be set \
-                 (generate with: openssl rand -hex 32). \
-                 The default test key provides no security and must not be \
-                 used in production."
-            ))?;
-        if encryption_key.trim().is_empty() {
-            anyhow::bail!(
-                "WEBHOOK_ENCRYPTION_KEY is set but empty; \
-                 generate a key with: openssl rand -hex 32"
-            );
-        }
+        let encryption_key =
+            encryption_key_from_env_value(std::env::var("WEBHOOK_ENCRYPTION_KEY").ok())?;
 
         Ok(Self {
             database_url: std::env::var("DATABASE_URL").context("missing DATABASE_URL")?,
@@ -105,6 +94,28 @@ impl Config {
     pub fn total_timeout(&self) -> Duration {
         Duration::from_secs(self.total_timeout_secs)
     }
+}
+
+/// Read and validate `WEBHOOK_ENCRYPTION_KEY` (#644).
+///
+/// A missing, empty, placeholder or weak key is a startup error that names the
+/// variable. The validation rules live in `lumenqraph_core::crypto` so the API
+/// and this service accept exactly the same keys.
+fn encryption_key_from_env_value(value: Option<String>) -> anyhow::Result<String> {
+    let key = value.ok_or_else(|| {
+        anyhow::anyhow!(
+            "WEBHOOK_ENCRYPTION_KEY must be set (generate with: openssl rand -hex 32). \
+             The default test key provides no security and must not be used in production."
+        )
+    })?;
+    if key.trim().is_empty() {
+        anyhow::bail!(
+            "WEBHOOK_ENCRYPTION_KEY is set but empty; generate a key with: openssl rand -hex 32"
+        );
+    }
+    lumenqraph_core::crypto::validate_webhook_encryption_key(&key)
+        .map_err(|e| anyhow::anyhow!("WEBHOOK_ENCRYPTION_KEY is invalid: {e}"))?;
+    Ok(key)
 }
 
 /// Parse `key`, or return `default` when unset/empty. A present but
@@ -149,6 +160,34 @@ mod tests {
         assert!(
             err.to_string().contains("WEBHOOK_ENCRYPTION_KEY"),
             "error should mention the missing var: {err}"
+        );
+    }
+
+    #[test]
+    fn encryption_key_rejects_missing_empty_placeholder_and_weak_values() {
+        for value in [
+            None,
+            Some(String::new()),
+            Some(" \t".to_string()),
+            Some("GENERATE_ME_WITH_openssl_rand_hex_32".to_string()),
+            Some("changeme".to_string()),
+        ] {
+            let err = encryption_key_from_env_value(value.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("WEBHOOK_ENCRYPTION_KEY"),
+                "{value:?} should be rejected naming the variable: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn encryption_key_accepts_a_generated_key_unchanged() {
+        let key = "9f3a6c1e0b7d4a2f8e5c91b3d6a04f7e2c8b5d1a9e6f3c0b7a4d2e8f1c5b9a36";
+        assert_eq!(
+            encryption_key_from_env_value(Some(key.to_string())).unwrap(),
+            key
         );
     }
 

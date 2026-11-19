@@ -114,11 +114,6 @@ pub struct ApiConfig {
     /// Retention for delivered/failed webhook deliveries. `0` disables pruning.
     pub webhook_delivery_retention_days: i64,
 
-    /// `pgp_sym_encrypt` key for webhook secrets. `None` falls back to the
-    /// legacy insecure test key (a warning is logged at startup).
-    pub webhook_encryption_key: Option<String>,
-
-
     /// Sibling instances mounted under a path prefix (`INSTANCE_MOUNTS`).
     pub mounts: Vec<(String, String)>,
     pub proxy: ProxyConfig,
@@ -135,17 +130,13 @@ impl ApiConfig {
         };
 
 
-        let webhook_encryption_key = required_env("WEBHOOK_ENCRYPTION_KEY")?;
+        let webhook_encryption_key =
+            webhook_encryption_key_from_value(std::env::var("WEBHOOK_ENCRYPTION_KEY").ok())?;
 
         // Reject bad origins at startup, naming the entry, rather than letting
         // CORS silently never match a browser's Origin header (#581).
         let cors_allowed_origins = env_string("CORS_ALLOWED_ORIGINS", "");
         parse_cors_origins(&cors_allowed_origins)?;
-
-        let webhook_encryption_key = std::env::var("WEBHOOK_ENCRYPTION_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty());
-
 
         let proxy_defaults = ProxyConfig::default();
 
@@ -202,6 +193,7 @@ impl ApiConfig {
             },
 
             webhook_encryption_key,
+            webhook_delivery_retention_days: env_parse("WEBHOOK_DELIVERY_RETENTION_DAYS", 14)?,
 
             mounts: crate::routes::proxy::parse_mounts(&env_string("INSTANCE_MOUNTS", "")),
             proxy: ProxyConfig {
@@ -227,22 +219,24 @@ impl ApiConfig {
     }
 }
 
-/// Read a required, non-empty environment value. In particular, the API must
-/// never silently encrypt webhook secrets with a built-in fallback key.
-fn required_env(key: &str) -> anyhow::Result<String> {
-    required_env_value(key, std::env::var(key).ok())
-}
-
-fn required_env_value(key: &str, value: Option<String>) -> anyhow::Result<String> {
-    let value = value.ok_or_else(|| {
-        anyhow::anyhow!("{key} is required; generate a strong value with `openssl rand -hex 32`")
+/// Read and validate `WEBHOOK_ENCRYPTION_KEY` (#644). The API must never
+/// silently encrypt webhook secrets with a built-in fallback key, so a missing,
+/// empty, placeholder or weak value is a startup error naming the variable. The
+/// rules are shared with the webhooks service in `lumenqraph_core::crypto`.
+fn webhook_encryption_key_from_value(value: Option<String>) -> anyhow::Result<String> {
+    let key = value.ok_or_else(|| {
+        anyhow::anyhow!(
+            "WEBHOOK_ENCRYPTION_KEY is required; generate a strong value with `openssl rand -hex 32`"
+        )
     })?;
-    if value.trim().is_empty() {
+    if key.trim().is_empty() {
         anyhow::bail!(
-            "{key} must not be empty; generate a strong value with `openssl rand -hex 32`"
+            "WEBHOOK_ENCRYPTION_KEY must not be empty; generate a strong value with `openssl rand -hex 32`"
         );
     }
-    Ok(value)
+    lumenqraph_core::crypto::validate_webhook_encryption_key(&key)
+        .map_err(|e| anyhow::anyhow!("WEBHOOK_ENCRYPTION_KEY is invalid: {e}"))?;
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -298,8 +292,6 @@ impl ApiConfig {
             webhook_encryption_key: "test-only-webhook-key".into(),
             webhook_delivery_retention_days: 14,
 
-            webhook_encryption_key: None,
-
             mounts: Vec::new(),
             proxy: ProxyConfig::default(),
         }
@@ -349,11 +341,6 @@ impl fmt::Debug for ApiConfig {
             .field(
                 "webhook_delivery_retention_days",
                 &self.webhook_delivery_retention_days,
-
-            .field(
-                "webhook_encryption_key",
-                &self.webhook_encryption_key.as_ref().map(|_| "[REDACTED]"),
-
             )
             .field("mounts", &self.mounts)
             .field("proxy", &self.proxy)
@@ -470,20 +457,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn required_webhook_encryption_key_rejects_missing_or_empty_values() {
-        for value in [None, Some(String::new()), Some(" \t\n".to_string())] {
-            let err = required_env_value("WEBHOOK_ENCRYPTION_KEY", value)
+    fn webhook_encryption_key_rejects_missing_empty_placeholder_and_weak_values() {
+        for value in [
+            None,
+            Some(String::new()),
+            Some(" \t\n".to_string()),
+            Some("GENERATE_ME_WITH_openssl_rand_hex_32".to_string()),
+            Some("secret".to_string()),
+        ] {
+            let err = webhook_encryption_key_from_value(value.clone())
                 .unwrap_err()
                 .to_string();
             assert!(
                 err.contains("WEBHOOK_ENCRYPTION_KEY"),
-                "error should name the variable: {err}"
+                "{value:?} should be rejected naming the variable: {err}"
             );
         }
+    }
 
+    #[test]
+    fn webhook_encryption_key_accepts_a_generated_key_unchanged() {
+        let key = "9f3a6c1e0b7d4a2f8e5c91b3d6a04f7e2c8b5d1a9e6f3c0b7a4d2e8f1c5b9a36";
         assert_eq!(
-            required_env_value("WEBHOOK_ENCRYPTION_KEY", Some("secret".into())).unwrap(),
-            "secret"
+            webhook_encryption_key_from_value(Some(key.to_string())).unwrap(),
+            key
         );
     }
 

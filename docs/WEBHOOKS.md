@@ -300,7 +300,7 @@ Webhook service behavior is controlled by environment variables (see [`docs/CONF
 | `WEBHOOK_MAX_CONCURRENT_PER_HOST` | 5 | Max concurrent deliveries to a single host |
 | `WEBHOOK_MAX_CONCURRENT_DELIVERIES` | 100 | Max total concurrent deliveries |
 | `WEBHOOK_FAILURE_THRESHOLD` | 10 | Consecutive failures before auto-disable |
-| `WEBHOOK_ENCRYPTION_KEY` | **REQUIRED** | Symmetric key for encrypting secrets at rest (pgcrypto). Generate with `openssl rand -hex 32`. Both API and webhooks services will refuse to start without this variable. |
+| `WEBHOOK_ENCRYPTION_KEY` | **REQUIRED** | Symmetric key for encrypting secrets at rest (pgcrypto). Generate with `openssl rand -hex 32`. Must be 64 hex characters or at least 43 base64 characters with enough variety. Both services refuse to start if it is missing, blank, the `.env.example` placeholder, or weak. |
 
 ## Database Schema
 
