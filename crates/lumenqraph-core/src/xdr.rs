@@ -260,6 +260,7 @@ fn i256_to_decimal(p: &stellar_xdr::curr::Int256Parts) -> String {
     let negative = (p.hi_hi as i64) < 0;
     if !negative {
         let unsigned = stellar_xdr::curr::UInt256Parts {
+            // `hi_hi` is signed in the XDR type; the cast keeps the bit pattern.
             hi_hi: p.hi_hi as u64,
             hi_lo: p.hi_lo,
             lo_hi: p.lo_hi,

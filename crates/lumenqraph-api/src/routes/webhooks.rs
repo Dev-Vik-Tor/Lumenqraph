@@ -941,7 +941,7 @@ pub async fn rotate_webhook_secret(
     validate_grace_seconds(grace_seconds)?;
 
 
-    // The required key is validated and loaded once at API startup.
+    // Same key source as create_webhook: validated once at startup, no fallback (#441).
     let encryption_key = state.config.webhook_encryption_key.as_str();
 
     let new_secret = random_secret();
